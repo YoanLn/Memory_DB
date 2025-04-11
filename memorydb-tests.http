@@ -1,0 +1,258 @@
+###
+# MemoryDB Core Operations
+# This file contains examples of the most common operations in MemoryDB
+###
+
+@baseUrl = http://localhost:8092
+@contentType = application/json
+@parquetFile = /Users/yoanln/MemoryDB/data/test2.parquet
+
+### Check server health
+GET {{baseUrl}}/api/cluster/health
+Accept: {{contentType}}
+
+<> 2025-04-09T162755.200.json
+<> 2025-04-09T161718.200.json
+<> 2025-04-09T161013.200.json
+<> 2025-04-09T155538.500.html
+<> 2025-04-09T155140.200.json
+<> 2025-04-08T230057.200.json
+<> 2025-04-08T225343.200.json
+
+### List all tables (useful to see what's already in the database)
+GET {{baseUrl}}/api/tables
+Accept: {{contentType}}
+
+<> 2025-04-09T163136.200.json
+<> 2025-04-09T162950.200.json
+
+### 1. Creating Tables
+
+### Create a "users" table
+POST {{baseUrl}}/api/tables
+Content-Type: {{contentType}}
+
+{
+  "name": "users",
+  "columns": [
+    {"name": "id", "type": "INTEGER", "nullable": false},
+    {"name": "name", "type": "STRING", "nullable": false},
+    {"name": "age", "type": "INTEGER", "nullable": true},
+    {"name": "active", "type": "BOOLEAN", "nullable": false}
+  ]
+}
+
+
+### Get details of a specific table
+GET {{baseUrl}}/api/tables/parquet_file
+Accept: {{contentType}}
+
+<> 2025-04-09T161124.200.json
+<> 2025-04-08T225507.200.json
+
+### 2. Loading Data
+
+POST {{baseUrl}}/api/tables/schema-from-parquet
+Content-Type: application/json
+
+{
+  "tableName": "parquet_file",
+  "filePath": "{{parquetFile}}"
+}
+
+
+<> 2025-04-09T155519.500.html
+<> 2025-04-08T230153.200.json
+<> 2025-04-08T225504.200.json
+
+###
+POST {{baseUrl}}/api/tables/parquet_file/load-parquet
+Content-Type: {{contentType}}
+
+{
+  "filePath": "{{parquetFile}}",
+  "rowLimit": 10000000,
+  "batchSize": 100000
+}
+
+<> 2025-04-09T162941.500.json
+<> 2025-04-09T162921.500.json
+<> 2025-04-09T162847.200.json
+<> 2025-04-09T161105.200.json
+<> 2025-04-09T161048.200.json
+<> 2025-04-09T161039.404.json
+
+###
+
+
+### B. Create a table directly from Parquet (schema discovery)
+POST {{baseUrl}}/api/tables/from-parquet
+Content-Type: {{contentType}}
+
+{
+  "tableName": "parquet_file",
+  "filePath": "{{parquetFile}}"
+}
+
+<> 2025-04-09T161758.500.json
+<> 2025-04-09T161030.201.json
+<> 2025-04-09T155202.201.json
+<> 2025-04-08T230127.201.json
+<> 2025-04-08T225434.201.json
+
+
+### 3. Querying Data
+
+### A. Basic query - select all columns
+POST {{baseUrl}}/api/query
+Content-Type: {{contentType}}
+
+{
+  "tableName": "users",
+  "columns": ["*"]
+}
+
+### B. Select specific columns
+POST {{baseUrl}}/api/query
+Content-Type: {{contentType}}
+
+{
+  "tableName": "parquet_file",
+  "columns": ["pickup_datetime", "dropoff_datetime", "trip_miles", "trip_time", "base_passenger_fare"],
+  "conditions": [
+    {
+      "columnName": "trip_miles",
+      "operator": "GREATER_THAN",
+      "value": 10.0
+    }
+  ],
+  "orderBy": "trip_miles",
+  "orderByAscending": false,
+  "limit": 50
+}
+
+<> 2025-04-09T163302.200.json
+<> 2025-04-09T163300.200.json
+<> 2025-04-08T230325.200.json
+<> 2025-04-08T225529.200.json
+
+### C. Query with filtering condition
+
+
+<> 2025-04-09T163437.500.json
+
+### D. Query with multiple conditions
+POST {{baseUrl}}/api/query
+Content-Type: {{contentType}}
+
+{
+  "tableName": "parquet_file",
+  "columns": ["PULocationID"],
+  "conditions": [
+    {
+      "columnName": "pickup_datetime",
+      "operator": "GREATER_THAN",
+      "value": 1672531200000
+    },
+    {
+      "columnName": "pickup_datetime",
+      "operator": "GREATER_THAN",
+      "value": 1675209600000
+    }
+  ],
+  "aggregateFunctions": {
+    "trip_count": "COUNT",
+    "avg_fare": "AVG(base_passenger_fare)"
+  },
+  "groupByColumns": ["PULocationID"],
+  "orderBy": "trip_count",
+  "orderByAscending": false,
+  "limit": 20
+}
+
+<> 2025-04-09T164804.500.json
+<> 2025-04-09T164723.200.json
+
+### E. Query with ordering
+POST {{baseUrl}}/api/query
+Content-Type: {{contentType}}
+
+{
+  "tableName": "users",
+  "columns": ["id", "name", "age"],
+  "orderBy": "age",
+  "orderByAscending": false
+}
+
+### F. Query with limiting results
+POST {{baseUrl}}/api/query
+Content-Type: {{contentType}}
+
+{
+  "tableName": "users",
+  "columns": ["id", "name", "age"],
+  "limit": 5
+}
+
+### G. Query with pagination
+POST {{baseUrl}}/api/query
+Content-Type: {{contentType}}
+
+{
+  "tableName": "users",
+  "columns": ["id", "name", "age"],
+  "page": 1,
+  "limit": 10
+}
+
+### Next page of results
+POST {{baseUrl}}/api/query
+Content-Type: {{contentType}}
+
+{
+  "tableName": "users",
+  "columns": ["id", "name", "age"],
+  "page": 2,
+  "limit": 10
+}
+
+### H. Simplified GET query (for simple queries)
+GET {{baseUrl}}/api/query/users?column=age&value=25&limit=10
+Accept: {{contentType}}
+
+### 4. Data Export
+
+### Export table to CSV
+GET {{baseUrl}}/api/export/parquet_file/csv
+Accept: text/csv
+
+### Export table to JSON
+GET {{baseUrl}}/api/export/parquet_file/json
+Accept: {{contentType}}
+
+### 5. Table Management
+
+### Get table statistics
+GET {{baseUrl}}/api/tables/parquet_file/stats
+Accept: {{contentType}}
+
+<> 2025-04-09T163026.200.json
+<> 2025-04-09T161151.200.json
+
+### Delete a table
+DELETE {{baseUrl}}/api/tables/parquet_file
+Accept: {{contentType}}
+
+### 6. Cluster Management
+
+### Get cluster information
+GET {{baseUrl}}/api/cluster/info
+Accept: {{contentType}}
+
+### Get all nodes in the cluster
+GET {{baseUrl}}/api/cluster/nodes
+Accept: {{contentType}}
+
+### Get cluster statistics
+GET {{baseUrl}}/api/cluster/stats
+Accept: {{contentType}}
