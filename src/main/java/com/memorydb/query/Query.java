@@ -14,8 +14,12 @@ public class Query {
     private final List<Condition> conditions;
     private final List<String> groupByColumns;
     private final Map<String, AggregateFunction> aggregateFunctions;
+    // Old single column order by (for backwards compatibility)
     private String orderBy;
     private boolean orderByAscending;
+    
+    // New multi-column order by support
+    private final List<OrderByColumn> orderByColumns;
     private int limit;
     
     /**
@@ -30,6 +34,7 @@ public class Query {
         this.aggregateFunctions = new HashMap<>();
         this.orderBy = null;
         this.orderByAscending = true;
+        this.orderByColumns = new ArrayList<>();
         this.limit = -1;
     }
     
@@ -90,6 +95,11 @@ public class Query {
     public Query orderByAsc(String columnName) {
         this.orderBy = columnName;
         this.orderByAscending = true;
+        
+        // Also update the new multi-column order by
+        this.orderByColumns.clear();
+        this.orderByColumns.add(new OrderByColumn(columnName, true));
+        
         return this;
     }
     
@@ -101,6 +111,47 @@ public class Query {
     public Query orderByDesc(String columnName) {
         this.orderBy = columnName;
         this.orderByAscending = false;
+        
+        // Also update the new multi-column order by
+        this.orderByColumns.clear();
+        this.orderByColumns.add(new OrderByColumn(columnName, false));
+        
+        return this;
+    }
+    
+    /**
+     * Ajoute une colonne de tri (ordre ascendant) à la liste des colonnes de tri
+     * Cela permet de trier par plusieurs colonnes
+     * @param columnName Le nom de la colonne
+     * @return Cette requête
+     */
+    public Query addOrderByAsc(String columnName) {
+        this.orderByColumns.add(new OrderByColumn(columnName, true));
+        
+        // Update single column orderBy if this is the first column
+        if (this.orderByColumns.size() == 1) {
+            this.orderBy = columnName;
+            this.orderByAscending = true;
+        }
+        
+        return this;
+    }
+    
+    /**
+     * Ajoute une colonne de tri (ordre descendant) à la liste des colonnes de tri
+     * Cela permet de trier par plusieurs colonnes
+     * @param columnName Le nom de la colonne
+     * @return Cette requête
+     */
+    public Query addOrderByDesc(String columnName) {
+        this.orderByColumns.add(new OrderByColumn(columnName, false));
+        
+        // Update single column orderBy if this is the first column
+        if (this.orderByColumns.size() == 1) {
+            this.orderBy = columnName;
+            this.orderByAscending = false;
+        }
+        
         return this;
     }
     
@@ -147,7 +198,7 @@ public class Query {
     }
     
     /**
-     * Obtient la colonne de tri
+     * Obtient la colonne de tri principale (pour compatibilité descendante)
      * @return La colonne
      */
     public String getOrderBy() {
@@ -155,11 +206,19 @@ public class Query {
     }
     
     /**
-     * Vérifie si le tri est ascendant
+     * Vérifie si le tri principal est ascendant (pour compatibilité descendante)
      * @return true si le tri est ascendant
      */
     public boolean isOrderByAscending() {
         return orderByAscending;
+    }
+    
+    /**
+     * Obtient la liste des colonnes de tri avec leur direction
+     * @return La liste des colonnes de tri
+     */
+    public List<OrderByColumn> getOrderByColumns() {
+        return new ArrayList<>(orderByColumns);
     }
     
     /**

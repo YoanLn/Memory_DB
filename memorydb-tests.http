@@ -33,12 +33,32 @@ POST {{baseUrl}}/api/tables
 Content-Type: {{contentType}}
 
 {
-  "name": "users",
+  "name": "parquet_file",
   "columns": [
-    {"name": "id", "type": "INTEGER", "nullable": false},
-    {"name": "name", "type": "STRING", "nullable": false},
-    {"name": "age", "type": "INTEGER", "nullable": true},
-    {"name": "active", "type": "BOOLEAN", "nullable": false}
+    {"name": "hvfhs_license_num", "type": "STRING", "nullable": true},
+    {"name": "dispatching_base_num", "type": "STRING", "nullable": true},
+    {"name": "originating_base_num", "type": "STRING", "nullable": true},
+    {"name": "request_datetime", "type": "LONG", "nullable": true},
+    {"name": "on_scene_datetime", "type": "LONG", "nullable": true},
+    {"name": "pickup_datetime", "type": "LONG", "nullable": true},
+    {"name": "dropoff_datetime", "type": "LONG", "nullable": true},
+    {"name": "PULocationID", "type": "INTEGER", "nullable": true},
+    {"name": "DOLocationID", "type": "INTEGER", "nullable": true},
+    {"name": "trip_miles", "type": "DOUBLE", "nullable": true},
+    {"name": "trip_time", "type": "LONG", "nullable": true},
+    {"name": "base_passenger_fare", "type": "DOUBLE", "nullable": true},
+    {"name": "tolls", "type": "DOUBLE", "nullable": true},
+    {"name": "bcf", "type": "DOUBLE", "nullable": true},
+    {"name": "sales_tax", "type": "DOUBLE", "nullable": true},
+    {"name": "congestion_surcharge", "type": "DOUBLE", "nullable": true},
+    {"name": "airport_fee", "type": "DOUBLE", "nullable": true},
+    {"name": "tips", "type": "DOUBLE", "nullable": true},
+    {"name": "driver_pay", "type": "DOUBLE", "nullable": true},
+    {"name": "shared_request_flag", "type": "STRING", "nullable": true},
+    {"name": "shared_match_flag", "type": "STRING", "nullable": true},
+    {"name": "access_a_ride_flag", "type": "STRING", "nullable": true},
+    {"name": "wav_request_flag", "type": "STRING", "nullable": true},
+    {"name": "wav_match_flag", "type": "STRING", "nullable": true}
   ]
 }
 
@@ -51,7 +71,6 @@ Accept: {{contentType}}
 <> 2025-04-08T225507.200.json
 
 ### 2. Loading Data
-
 POST {{baseUrl}}/api/tables/schema-from-parquet
 Content-Type: application/json
 
@@ -126,8 +145,16 @@ Content-Type: {{contentType}}
       "value": 10.0
     }
   ],
-  "orderBy": "trip_miles",
-  "orderByAscending": false,
+  "orderBy": [
+    {
+      "column": "trip_miles",
+      "ascending": false
+    },
+    {
+      "column": "trip_time",
+      "ascending": true
+    }
+  ],
   "limit": 50
 }
 

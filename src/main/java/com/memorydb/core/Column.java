@@ -9,6 +9,21 @@ public class Column {
     private final String name;
     private final DataType type;
     private final boolean nullable;
+    private final boolean indexed; // Indique si la colonne doit être indexée pour optimiser les recherches
+    
+    /**
+     * Crée une nouvelle colonne
+     * @param name Le nom de la colonne
+     * @param type Le type de données de la colonne
+     * @param nullable Indique si la colonne peut contenir des valeurs nulles
+     * @param indexed Indique si la colonne doit être indexée pour optimiser les recherches
+     */
+    public Column(String name, DataType type, boolean nullable, boolean indexed) {
+        this.name = name;
+        this.type = type;
+        this.nullable = nullable;
+        this.indexed = indexed;
+    }
     
     /**
      * Crée une nouvelle colonne
@@ -17,9 +32,7 @@ public class Column {
      * @param nullable Indique si la colonne peut contenir des valeurs nulles
      */
     public Column(String name, DataType type, boolean nullable) {
-        this.name = name;
-        this.type = type;
-        this.nullable = nullable;
+        this(name, type, nullable, false);
     }
     
     /**
@@ -28,7 +41,7 @@ public class Column {
      * @param type Le type de données de la colonne
      */
     public Column(String name, DataType type) {
-        this(name, type, false);
+        this(name, type, false, false);
     }
     
     /**
@@ -55,12 +68,21 @@ public class Column {
         return nullable;
     }
     
+    /**
+     * Vérifie si la colonne est indexée pour optimiser les recherches
+     * @return true si la colonne est indexée
+     */
+    public boolean isIndexed() {
+        return indexed;
+    }
+    
     @Override
     public String toString() {
         return "Column{" +
                 "name='" + name + '\'' +
                 ", type=" + type +
                 ", nullable=" + nullable +
+                ", indexed=" + indexed +
                 '}';
     }
 } 

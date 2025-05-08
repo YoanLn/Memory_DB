@@ -3,8 +3,8 @@ package com.memorydb.rest.dto;
 import com.memorydb.query.Condition;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
-import java.util.stream.Collectors;
 
 /**
  * DTO pour les requêtes
@@ -13,8 +13,10 @@ public class QueryDto {
     private String tableName;
     private List<String> columns;
     private List<ConditionDto> conditions;
-    private String orderBy;
-    private boolean orderByAscending;
+    private List<OrderByDto> orderBy;
+// Keeping these for backward compatibility
+private String orderByColumn;
+private boolean orderByAscending;
     private int limit;
     private boolean distributed;
     
@@ -29,19 +31,27 @@ public class QueryDto {
      * @param tableName Le nom de la table
      * @param columns Les colonnes à sélectionner
      * @param conditions Les conditions de la requête
-     * @param orderBy La colonne pour le tri
+     * @param orderByColumn La colonne pour le tri (compatibilité descendante)
      * @param orderByAscending true pour un tri ascendant, false pour descendant
      * @param limit La limite de résultats
      */
     public QueryDto(String tableName, List<String> columns, List<ConditionDto> conditions, 
-                   String orderBy, boolean orderByAscending, int limit) {
+                   String orderByColumn, boolean orderByAscending, int limit) {
         this.tableName = tableName;
         this.columns = columns;
         this.conditions = conditions;
-        this.orderBy = orderBy;
+        this.orderByColumn = orderByColumn;
         this.orderByAscending = orderByAscending;
         this.limit = limit;
         this.distributed = false;
+        
+        // Initialize orderBy list with the single column for backward compatibility
+        if (orderByColumn != null && !orderByColumn.isEmpty()) {
+            this.orderBy = new ArrayList<>();
+            this.orderBy.add(new OrderByDto(orderByColumn, orderByAscending));
+        } else {
+            this.orderBy = new ArrayList<>();
+        }
     }
     
     /**
@@ -49,20 +59,28 @@ public class QueryDto {
      * @param tableName Le nom de la table
      * @param columns Les colonnes à sélectionner
      * @param conditions Les conditions de la requête
-     * @param orderBy La colonne pour le tri
+     * @param orderByColumn La colonne pour le tri (compatibilité descendante)
      * @param orderByAscending true pour un tri ascendant, false pour descendant
      * @param limit La limite de résultats
      * @param distributed true pour exécuter la requête en mode distribué
      */
     public QueryDto(String tableName, List<String> columns, List<ConditionDto> conditions, 
-                   String orderBy, boolean orderByAscending, int limit, boolean distributed) {
+                   String orderByColumn, boolean orderByAscending, int limit, boolean distributed) {
         this.tableName = tableName;
         this.columns = columns;
         this.conditions = conditions;
-        this.orderBy = orderBy;
+        this.orderByColumn = orderByColumn;
         this.orderByAscending = orderByAscending;
         this.limit = limit;
         this.distributed = distributed;
+        
+        // Initialize orderBy list with the single column for backward compatibility
+        if (orderByColumn != null && !orderByColumn.isEmpty()) {
+            this.orderBy = new ArrayList<>();
+            this.orderBy.add(new OrderByDto(orderByColumn, orderByAscending));
+        } else {
+            this.orderBy = new ArrayList<>();
+        }
     }
     
     /**
@@ -118,28 +136,73 @@ public class QueryDto {
      * @return La liste des conditions
      */
     public List<Condition> toConditions() {
-        if (conditions == null) {
-            return new ArrayList<>();
+        if (conditions == null || conditions.isEmpty()) {
+            return Collections.emptyList(); // Utiliser une liste constante plutôt qu'une nouvelle instance
         }
-        return conditions.stream()
-                .map(ConditionDto::toCondition)
-                .collect(Collectors.toList());
+        
+        // Pré-allouer avec la taille exacte et éviter les streams pour cette opération simple
+        List<Condition> result = new ArrayList<>(conditions.size());
+        for (ConditionDto conditionDto : conditions) {
+            result.add(conditionDto.toCondition());
+        }
+        return result;
     }
     
     /**
-     * Obtient la colonne pour le tri
-     * @return La colonne
+     * Obtient les colonnes pour le tri
+     * @return Les colonnes de tri avec leurs directions
      */
-    public String getOrderBy() {
+    public List<OrderByDto> getOrderBy() {
         return orderBy;
     }
     
     /**
-     * Définit la colonne pour le tri
-     * @param orderBy La colonne
+     * Définit les colonnes pour le tri
+     * @param orderBy Les colonnes de tri avec leurs directions
      */
-    public void setOrderBy(String orderBy) {
+    public void setOrderBy(List<OrderByDto> orderBy) {
         this.orderBy = orderBy;
+    }
+    
+    /**
+     * Obtient la colonne pour le tri (compatibilité descendante)
+     * @return La colonne
+     */
+    public String getOrderByColumn() {
+        if (orderByColumn != null) {
+            return orderByColumn;
+        } else if (orderBy != null && !orderBy.isEmpty()) {
+            return orderBy.get(0).getColumn();
+        }
+        return null;
+    }
+    
+    /**
+     * Définit la colonne pour le tri (compatibilité descendante)
+     * @param orderByColumn La colonne
+     */
+    public void setOrderByColumn(String orderByColumn) {
+        this.orderByColumn = orderByColumn;
+        
+        // Mise à jour optimisée pour éviter les allocations inutiles
+        if (orderByColumn != null && !orderByColumn.isEmpty()) {
+            if (this.orderBy == null) {
+                this.orderBy = new ArrayList<>(1); // Capacité initiale exacte
+                this.orderBy.add(new OrderByDto(orderByColumn, this.orderByAscending));
+            } else if (this.orderBy.isEmpty()) {
+                this.orderBy.add(new OrderByDto(orderByColumn, this.orderByAscending));
+            } else {
+                // Réutiliser l'objet existant si possible
+                OrderByDto first = this.orderBy.get(0);
+                if (this.orderBy.size() == 1 && first != null) {
+                    first.setColumn(orderByColumn);
+                    first.setAscending(this.orderByAscending);
+                } else {
+                    this.orderBy.clear();
+                    this.orderBy.add(new OrderByDto(orderByColumn, this.orderByAscending));
+                }
+            }
+        }
     }
     
     /**

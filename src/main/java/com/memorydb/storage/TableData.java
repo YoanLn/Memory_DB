@@ -105,7 +105,6 @@ public class TableData {
      * @param columnIndex L'index de la colonne
      * @param value La valeur à ajouter
      */
-    @SuppressWarnings("unchecked")
     private void addValue(int columnIndex, Object value) {
         ColumnStore columnStore = columnStores.get(columnIndex);
         
@@ -168,5 +167,19 @@ public class TableData {
      */
     public void writeUnlock() {
         lock.writeLock().unlock();
+    }
+    
+    /**
+     * Incrémente le compteur de lignes
+     * Utilisé par les loaders optimisés pour éviter des allocations inutiles
+     * ATTENTION: Cette méthode doit être appelée uniquement après avoir ajouté toutes les valeurs de colonne
+     */
+    public void incrementRowCount() {
+        lock.writeLock().lock();
+        try {
+            rowCount++;
+        } finally {
+            lock.writeLock().unlock();
+        }
     }
 } 

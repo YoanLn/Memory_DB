@@ -1,7 +1,12 @@
 package com.memorydb.storage;
 
+import java.util.BitSet;
+import java.util.HashMap;
+import java.util.Map;
+
 import com.memorydb.common.DataType;
 import com.memorydb.core.Column;
+import com.memorydb.index.BitmapIndex;
 
 /**
  * Stockage en colonnes pour les données en mémoire
@@ -18,9 +23,22 @@ public class ColumnStore {
     private float[] floatValues;
     private double[] doubleValues;
     private boolean[] booleanValues;
-    private String[] stringValues;
     private long[] dateValues; // stockées en millisecondes depuis l'epoch
     private boolean[] nullFlags; // indique si la valeur est null
+    
+    // Optimisation pour les colonnes de type String
+    private Map<String, Integer> stringDictionary; // dictionnaire pour la compression des chaînes
+    private int[] stringDictionaryIndex; // index dans le dictionnaire pour chaque valeur
+    private String[] dictionaryValues; // tableau inverse pour retrouver la chaîne à partir de l'index
+    private int dictionarySize; // nombre de chaînes uniques dans le dictionnaire
+    
+    // Bitmap indexes pour accélérer les requêtes
+    private BitmapIndex<Integer> intIndex;    // Pour les INTEGER
+    private BitmapIndex<Long> longIndex;      // Pour les LONG, DATE, TIMESTAMP
+    private BitmapIndex<Float> floatIndex;    // Pour les FLOAT
+    private BitmapIndex<Double> doubleIndex;  // Pour les DOUBLE
+    private BitmapIndex<Boolean> boolIndex;   // Pour les BOOLEAN
+    private BitmapIndex<String> stringIndex;  // Pour les STRING
     
     private static final int INITIAL_CAPACITY = 1024;
     private static final float GROWTH_FACTOR = 1.5f;
@@ -34,6 +52,12 @@ public class ColumnStore {
         this.type = column.getType();
         this.capacity = INITIAL_CAPACITY;
         this.size = 0;
+        
+        // Initialiser les index bitmap si nécessaire
+        // Nous créons uniquement les index pour les colonnes susceptibles d'être utilisées dans des conditions de filtre
+        if (column.isIndexed()) {
+            initializeBitmapIndex();
+        }
         
         // Initialise le stockage approprié selon le type
         switch (type) {
@@ -54,7 +78,11 @@ public class ColumnStore {
                 booleanValues = new boolean[capacity];
                 break;
             case STRING:
-                stringValues = new String[capacity];
+                // Utilisation d'un dictionnaire pour optimiser le stockage des chaînes
+                stringDictionary = new HashMap<>();
+                stringDictionaryIndex = new int[capacity];
+                dictionaryValues = new String[1024]; // Taille initiale du dictionnaire
+                dictionarySize = 0;
                 break;
             case DATE:
                 dateValues = new long[capacity];
@@ -73,7 +101,14 @@ public class ColumnStore {
      */
     public void addInt(int value) {
         ensureCapacity(size + 1);
-        intValues[size++] = value;
+        intValues[size] = value;
+        
+        // Mettre à jour l'index bitmap si activé
+        if (intIndex != null && intIndex.isEnabled()) {
+            intIndex.add(value, size);
+        }
+        
+        size++;
     }
     
     /**
@@ -82,7 +117,14 @@ public class ColumnStore {
      */
     public void addLong(long value) {
         ensureCapacity(size + 1);
-        longValues[size++] = value;
+        longValues[size] = value;
+        
+        // Mettre à jour l'index bitmap si activé
+        if (longIndex != null && longIndex.isEnabled()) {
+            longIndex.add(value, size);
+        }
+        
+        size++;
     }
     
     /**
@@ -91,7 +133,14 @@ public class ColumnStore {
      */
     public void addFloat(float value) {
         ensureCapacity(size + 1);
-        floatValues[size++] = value;
+        floatValues[size] = value;
+        
+        // Mettre à jour l'index bitmap si activé
+        if (floatIndex != null && floatIndex.isEnabled()) {
+            floatIndex.add(value, size);
+        }
+        
+        size++;
     }
     
     /**
@@ -100,7 +149,14 @@ public class ColumnStore {
      */
     public void addDouble(double value) {
         ensureCapacity(size + 1);
-        doubleValues[size++] = value;
+        doubleValues[size] = value;
+        
+        // Mettre à jour l'index bitmap si activé
+        if (doubleIndex != null && doubleIndex.isEnabled()) {
+            doubleIndex.add(value, size);
+        }
+        
+        size++;
     }
     
     /**
@@ -109,16 +165,58 @@ public class ColumnStore {
      */
     public void addBoolean(boolean value) {
         ensureCapacity(size + 1);
-        booleanValues[size++] = value;
+        booleanValues[size] = value;
+        
+        // Mettre à jour l'index bitmap si activé
+        if (boolIndex != null && boolIndex.isEnabled()) {
+            boolIndex.add(value, size);
+        }
+        
+        size++;
     }
     
     /**
-     * Ajoute une chaîne à la colonne
+     * Ajoute une chaîne à la colonne avec compression par dictionnaire
      * @param value La valeur à ajouter
      */
     public void addString(String value) {
         ensureCapacity(size + 1);
-        stringValues[size++] = value;
+        
+        // Traiter les valeurs null spécialement
+        if (value == null) {
+            addNull();
+            return;
+        }
+        
+        // Réutiliser les chaînes identiques via l'interning pour réduire la consommation mémoire
+        value = value.intern();
+        
+        // Compression par dictionnaire
+        Integer dictIndex = stringDictionary.get(value);
+        if (dictIndex == null) {
+            // Nouvelle chaîne, ajouter au dictionnaire
+            dictIndex = dictionarySize;
+            stringDictionary.put(value, dictIndex);
+            
+            // S'assurer que le tableau du dictionnaire a suffisamment de place
+            if (dictionarySize >= dictionaryValues.length) {
+                int newCapacity = Math.max(dictionarySize + 1, (int)(dictionaryValues.length * 1.5f));
+                String[] newDict = new String[newCapacity];
+                System.arraycopy(dictionaryValues, 0, newDict, 0, dictionarySize);
+                dictionaryValues = newDict;
+            }
+            
+            dictionaryValues[dictionarySize++] = value;
+        }
+        
+        stringDictionaryIndex[size] = dictIndex;
+        
+        // Mettre à jour l'index bitmap si activé
+        if (stringIndex != null && stringIndex.isEnabled()) {
+            stringIndex.add(value, size);
+        }
+        
+        size++;
     }
     
     /**
@@ -223,13 +321,16 @@ public class ColumnStore {
      * @return La chaîne
      */
     public String getString(int index) {
-        if (index >= size) {
-            throw new IndexOutOfBoundsException("Index: " + index + ", Size: " + size);
+        if (index < 0 || index >= size) {
+            throw new IndexOutOfBoundsException("Indice invalide: " + index);
         }
+        
         if (nullFlags != null && nullFlags[index]) {
             return null;
         }
-        return stringValues[index];
+        
+        int dictIndex = stringDictionaryIndex[index];
+        return dictionaryValues[dictIndex];
     }
     
     /**
@@ -257,6 +358,162 @@ public class ColumnStore {
             throw new IndexOutOfBoundsException("Index: " + index + ", Size: " + size);
         }
         return nullFlags != null && nullFlags[index];
+    }
+    
+    /**
+     * Initialise les index bitmap en fonction du type de données
+     */
+    private void initializeBitmapIndex() {
+        switch (type) {
+            case INTEGER:
+                intIndex = new BitmapIndex<>();
+                break;
+            case LONG:
+            case TIMESTAMP:
+            case DATE:
+                longIndex = new BitmapIndex<>();
+                break;
+            case FLOAT:
+                floatIndex = new BitmapIndex<>();
+                break;
+            case DOUBLE:
+                doubleIndex = new BitmapIndex<>();
+                break;
+            case BOOLEAN:
+                boolIndex = new BitmapIndex<>();
+                break;
+            case STRING:
+                stringIndex = new BitmapIndex<>();
+                break;
+        }
+    }
+    
+    /**
+     * Recherche rapide des lignes qui correspondent à une valeur égale à la valeur spécifiée
+     * @param value La valeur à rechercher
+     * @return BitSet contenant les indices des lignes correspondantes, ou null si l'index n'est pas disponible
+     */
+    public BitSet findEqual(Object value) {
+        if (value == null) {
+            return null; // Cas spécial pour null, à implémenter si nécessaire
+        }
+        
+        switch (type) {
+            case INTEGER:
+                if (intIndex != null) {
+                    return intIndex.search((Integer) value);
+                }
+                break;
+            case LONG:
+            case TIMESTAMP:
+            case DATE:
+                if (longIndex != null) {
+                    return longIndex.search((Long) value);
+                }
+                break;
+            case FLOAT:
+                if (floatIndex != null) {
+                    return floatIndex.search((Float) value);
+                }
+                break;
+            case DOUBLE:
+                if (doubleIndex != null) {
+                    return doubleIndex.search((Double) value);
+                }
+                break;
+            case BOOLEAN:
+                if (boolIndex != null) {
+                    return boolIndex.search((Boolean) value);
+                }
+                break;
+            case STRING:
+                if (stringIndex != null) {
+                    return stringIndex.search((String) value);
+                }
+                break;
+        }
+        
+        return null; // Index non disponible
+    }
+    
+    /**
+     * Réinitialise les index bitmap
+     * Utile après des modifications massives dans la table
+     */
+    public void resetIndexes() {
+        if (intIndex != null) intIndex.clear();
+        if (longIndex != null) longIndex.clear();
+        if (floatIndex != null) floatIndex.clear();
+        if (doubleIndex != null) doubleIndex.clear();
+        if (boolIndex != null) boolIndex.clear();
+        if (stringIndex != null) stringIndex.clear();
+        
+        // Reconstruit les index si nécessaire
+        if (column.isIndexed()) {
+            rebuildIndexes();
+        }
+    }
+    
+    /**
+     * Reconstruit tous les index bitmap
+     */
+    private void rebuildIndexes() {
+        // Rien à faire si la colonne n'est pas indexée
+        if (!column.isIndexed()) return;
+        
+        switch (type) {
+            case INTEGER:
+                intIndex = new BitmapIndex<>();
+                for (int i = 0; i < size; i++) {
+                    if (nullFlags == null || !nullFlags[i]) {
+                        intIndex.add(intValues[i], i);
+                    }
+                }
+                break;
+            case LONG:
+            case TIMESTAMP:
+            case DATE:
+                longIndex = new BitmapIndex<>();
+                for (int i = 0; i < size; i++) {
+                    if (nullFlags == null || !nullFlags[i]) {
+                        longIndex.add(longValues[i], i);
+                    }
+                }
+                break;
+            case FLOAT:
+                floatIndex = new BitmapIndex<>();
+                for (int i = 0; i < size; i++) {
+                    if (nullFlags == null || !nullFlags[i]) {
+                        floatIndex.add(floatValues[i], i);
+                    }
+                }
+                break;
+            case DOUBLE:
+                doubleIndex = new BitmapIndex<>();
+                for (int i = 0; i < size; i++) {
+                    if (nullFlags == null || !nullFlags[i]) {
+                        doubleIndex.add(doubleValues[i], i);
+                    }
+                }
+                break;
+            case BOOLEAN:
+                boolIndex = new BitmapIndex<>();
+                for (int i = 0; i < size; i++) {
+                    if (nullFlags == null || !nullFlags[i]) {
+                        boolIndex.add(booleanValues[i], i);
+                    }
+                }
+                break;
+            case STRING:
+                stringIndex = new BitmapIndex<>();
+                for (int i = 0; i < size; i++) {
+                    if (nullFlags == null || !nullFlags[i]) {
+                        int dictIndex = stringDictionaryIndex[i];
+                        stringIndex.add(dictionaryValues[dictIndex], i);
+                    }
+                }
+                break;
+        }
     }
     
     /**
@@ -319,9 +576,10 @@ public class ColumnStore {
                     booleanValues = newBooleanValues;
                     break;
                 case STRING:
-                    String[] newStringValues = new String[newCapacity];
-                    System.arraycopy(stringValues, 0, newStringValues, 0, size);
-                    stringValues = newStringValues;
+                    // Redimensionner uniquement le tableau des index du dictionnaire
+                    int[] newStringDictionaryIndex = new int[newCapacity];
+                    System.arraycopy(stringDictionaryIndex, 0, newStringDictionaryIndex, 0, size);
+                    stringDictionaryIndex = newStringDictionaryIndex;
                     break;
                 case DATE:
                     long[] newDateValues = new long[newCapacity];
