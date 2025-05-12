@@ -100,61 +100,6 @@ public class NodeClient {
     }
     
     /**
-     * Exécute une requête sur un nœud distant en mode transmis (forwarded) pour éviter les boucles infinies
-     * @param node Le nœud distant
-     * @param query La requête à exécuter
-     * @return La liste des résultats
-     */
-    public static List<Map<String, Object>> executeForwardedQuery(NodeInfo node, Query query) {
-        try {
-            String url = String.format("http://%s:%d/api/query/forwarded", node.getAddress(), node.getPort());
-            
-            // Convertit les conditions en ConditionDto
-            List<ConditionDto> conditionDtos = null;
-            if (query.getConditions() != null && !query.getConditions().isEmpty()) {
-                conditionDtos = query.getConditions().stream()
-                        .map(condition -> {
-                            Condition.Operator operator = condition.getOperator();
-                            String operatorStr = operator.name();
-                            return new ConditionDto(
-                                    condition.getColumnName(),
-                                    operatorStr,
-                                    condition.getValue());
-                        })
-                        .collect(Collectors.toList());
-            }
-            
-            // Convertit la requête en DTO
-            QueryDto queryDto = new QueryDto(
-                    query.getTableName(),
-                    query.getColumns(),
-                    conditionDtos,
-                    query.getOrderBy(),
-                    query.isOrderByAscending(),
-                    query.getLimit(),
-                    false  // La requête n'est plus distribuée pour éviter les boucles infinies
-            );
-            
-            // Envoie la demande au endpoint spécial pour les requêtes transmises
-            Response response = client.target(url)
-                    .request(MediaType.APPLICATION_JSON)
-                    .post(Entity.entity(queryDto, MediaType.APPLICATION_JSON));
-            
-            if (response.getStatus() == Response.Status.OK.getStatusCode()) {
-                return response.readEntity(new GenericType<List<Map<String, Object>>>() {});
-            } else {
-                logger.error("Échec de l'exécution de la requête transmise sur le nœud {}: {} - {}", 
-                        node.getId(), response.getStatus(), response.readEntity(String.class));
-                return new ArrayList<>();
-            }
-        } catch (Exception e) {
-            logger.error("Erreur lors de l'exécution de la requête transmise sur le nœud {}: {}", 
-                    node.getId(), e.getMessage());
-            return new ArrayList<>();
-        }
-    }
-    
-    /**
      * Exécute une requête sur un nœud distant
      * @param node Le nœud distant
      * @param query La requête à exécuter
@@ -180,16 +125,13 @@ public class NodeClient {
             }
             
             // Convertit la requête en DTO
-            // IMPORTANT: Marquer explicitement comme NON-distribuée pour éviter les boucles infinies
-            // entre les nœuds (sinon chaque nœud demande à tous les autres nœuds, etc.)
             QueryDto queryDto = new QueryDto(
                     query.getTableName(),
                     query.getColumns(),
                     conditionDtos,
                     query.getOrderBy(),
                     query.isOrderByAscending(),
-                    query.getLimit(),
-                    false  // Force la requête à être non-distribuée pour les nœuds distants
+                    query.getLimit()
             );
             
             // Envoie la demande

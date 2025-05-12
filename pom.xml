@@ -172,7 +172,6 @@
                 <groupId>io.quarkus</groupId>
                 <artifactId>quarkus-maven-plugin</artifactId>
                 <version>${quarkus.version}</version>
-                <extensions>true</extensions>
                 <executions>
                     <execution>
                         <goals>
@@ -182,6 +181,10 @@
                         </goals>
                     </execution>
                 </executions>
+                <configuration>
+                    <!-- Configurez la création d'un uber-JAR -->
+                    <uberJar>true</uberJar>
+                </configuration>
             </plugin>
         </plugins>
     </build>
