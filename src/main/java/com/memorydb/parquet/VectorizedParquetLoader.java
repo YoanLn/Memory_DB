@@ -43,6 +43,12 @@ public class VectorizedParquetLoader {
     /**
      * Charge un fichier Parquet dans une table existante
      * Utilise une approche de streaming par batch pour une meilleure gestion de la mémoire
+     * Supporté pour sauter des lignes et limiter le nombre de lignes chargées
+     * 
+     * @param tableName Nom de la table où charger les données
+     * @param filePath Chemin du fichier Parquet à charger
+     * @param options Options de chargement (batch, limite, filtrage, etc.)
+     * @return Statistiques de chargement
      */
     public ParquetLoadStats loadParquetFile(String tableName, String filePath, ParquetLoadOptions options) 
             throws IOException {
@@ -77,9 +83,13 @@ public class VectorizedParquetLoader {
             // Configuration pour le streaming par batch
             long rowLimit = options.getRowLimit();
             int batchSize = options.getBatchSize();
+            int skipRows = options.getSkipRows();
             long totalRows = 0;
             int batchCount = 0;
             boolean timeout = false;
+            
+            logger.info("Début du chargement de {} avec options: skipRows={}, rowLimit={}, batchSize={}", 
+                    filePath, skipRows, rowLimit, batchSize);
             
             tableData.writeLock();
             try {
@@ -94,7 +104,52 @@ public class VectorizedParquetLoader {
                     
                     // Lecture par batch
                     Group record;
-                    while ((record = reader.read()) != null) {
+                    long rowIndex = 0;
+                    long skippedRows = 0;
+                    
+                    // Vérifie si le filtrage modulo est activé
+                    Integer nodeIndex = null;
+                    Integer nodeCount = null;
+                    
+                    if (options.getFilterOptions() != null) {
+                        Map<String, Object> filterOpts = options.getFilterOptions();
+                        if (filterOpts.containsKey("nodeIndex") && filterOpts.containsKey("nodeCount")) {
+                            nodeIndex = ((Number)filterOpts.get("nodeIndex")).intValue();
+                            nodeCount = ((Number)filterOpts.get("nodeCount")).intValue();
+                            logger.info("Filtrage modulo activé: nodeIndex={}, nodeCount={}", nodeIndex, nodeCount);
+                        }
+                    }
+                    
+                    // Saute les premières lignes si demandé
+                    if (skipRows > 0) {
+                        logger.info("Saute les {} premières lignes du fichier", skipRows);
+                        long startSkipTime = System.currentTimeMillis();
+                        
+                        while (skippedRows < skipRows && (record = reader.read()) != null) {
+                            skippedRows++;
+                            rowIndex++;
+                        }
+                        
+                        long skipDuration = System.currentTimeMillis() - startSkipTime;
+                        logger.info("{} lignes sautées en {} ms", skippedRows, skipDuration);
+                        
+                        // Si on n'a pas pu sauter toutes les lignes demandées, le fichier est trop petit
+                        if (skippedRows < skipRows) {
+                            logger.warn("Impossible de sauter toutes les lignes demandées, le fichier ne contient que {} lignes", skippedRows);
+                            return stats; // Retourne sans charger de ligne (fichier trop court)
+                        }
+                    }
+                        
+                    // Traite le reste du fichier (ou jusqu'à la limite)
+                    boolean reachedLimit = false;
+                    while (!reachedLimit && (record = reader.read()) != null) {
+                        // Vérifie si on a atteint la limite
+                        if (rowLimit > 0 && totalRows >= rowLimit) {
+                            logger.info("Limite de {} lignes atteinte", rowLimit);
+                            reachedLimit = true;
+                            break;
+                        }
+                        
                         // Vérifie le timeout
                         if (options.getTimeoutSeconds() > 0 && 
                             (System.currentTimeMillis() - startTime) / 1000 > options.getTimeoutSeconds()) {
@@ -103,16 +158,21 @@ public class VectorizedParquetLoader {
                             break;
                         }
                         
-                        // Vérifie la limite de lignes
-                        if (rowLimit > 0 && totalRows >= rowLimit) {
-                            logger.info("Limite de lignes atteinte: {}", rowLimit);
-                            break;
+                        // Applique le filtrage modulo si demandé
+                        if (nodeIndex != null && nodeCount != null) {
+                            // Ne prend que les lignes où rowIndex % nodeCount == nodeIndex
+                            if (rowIndex % nodeCount != nodeIndex) {
+                                rowIndex++;
+                                continue;
+                            }
                         }
                         
                         // Extraction des valeurs de la ligne
                         Object[] rowValues = extractValues(record, columns, schema);
                         batchData.add(rowValues);
                         totalRows++;
+                        
+                        rowIndex++; // increment rowIndex after each row is processed
                         
                         // Si le batch est complet, on l'insère dans la table
                         if (batchData.size() >= batchSize) {
@@ -367,6 +427,126 @@ public class VectorizedParquetLoader {
             default:
                 return false;
         }
+    }
+    
+    /**
+     * Charge une ligne spécifique d'un fichier Parquet dans une table
+     * Méthode optimisée pour un accès direct sans lecture du fichier entier
+     * 
+     * @param tableName Nom de la table où charger la ligne
+     * @param filePath Chemin du fichier Parquet
+     * @param rowIndex Index de la ligne à charger (0-based)
+     * @return Statistiques de chargement, avec 1 ou 0 ligne traitée
+     * @throws IOException En cas d'erreur d'accès au fichier
+     */
+    public ParquetLoadStats loadSpecificRow(String tableName, String filePath, int rowIndex) throws IOException {
+        long startTime = System.currentTimeMillis();
+        
+        // Vérifie que la table existe
+        Table table = databaseContext.getTable(tableName);
+        if (table == null) {
+            throw new IllegalArgumentException("Table introuvable: " + tableName);
+        }
+        
+        TableData tableData = databaseContext.getTableData(tableName);
+        ParquetLoadStats stats = new ParquetLoadStats();
+        Configuration conf = new Configuration();
+        Path path = new Path(filePath);
+        
+        // Configuration optimisée pour la lecture
+        conf.set("fs.hdfs.impl.disable.cache", "false");
+        conf.set("parquet.read.support.class", "org.apache.parquet.hadoop.example.GroupReadSupport");
+        
+        tableData.writeLock();
+        try {
+            try (ParquetReader<Group> reader = ParquetReader.builder(new GroupReadSupport(), path)
+                    .withConf(conf)
+                    .build()) {
+                
+                Group record = null;
+                int currentRow = 0;
+                
+                // Méthode optimisée: accès direct à la ligne demandée
+                // Saute rapidement les lignes jusqu'à l'index voulu
+                while (currentRow < rowIndex && (record = reader.read()) != null) {
+                    // Saute les lignes précédentes sans traitement
+                    currentRow++;
+                }
+                
+                // Si nous avons atteint la ligne demandée
+                if (currentRow == rowIndex && (record = reader.read()) != null) {
+                    // La ligne existe, on la charge dans la table
+                    List<Column> columns = table.getColumns();
+                    
+                    // Ouvre le fichier pour vérifier le schéma
+                    try (ParquetFileReader schemaReader = ParquetFileReader.open(HadoopInputFile.fromPath(path, conf))) {
+                        MessageType schema = schemaReader.getFooter().getFileMetaData().getSchema();
+                        validateSchema(table, schema);
+                        
+                        // Traite la ligne
+                        Object[] rowValues = extractValues(record, columns, schema);
+                        tableData.addRow(rowValues);
+                        stats.incrementRowsProcessed(1);
+                        
+                        long elapsedMs = System.currentTimeMillis() - startTime;
+                        logger.info("Ligne {} chargée avec succès dans la table {} en {} ms", rowIndex, tableName, elapsedMs);
+                    }
+                } else {
+                    // La ligne demandée n'existe pas
+                    logger.warn("La ligne {} n'existe pas dans le fichier {}", rowIndex, filePath);
+                }
+            }
+        } finally {
+            tableData.writeUnlock();
+        }
+        
+        stats.setElapsedTimeMs(System.currentTimeMillis() - startTime);
+        return stats;
+    }
+    
+    /**
+     * Compte le nombre de lignes dans un fichier Parquet sans charger les données
+     * @param filePath Chemin du fichier Parquet
+     * @return Statistiques sur le fichier Parquet
+     */
+    public ParquetLoadStats countParquetRows(String filePath) {
+        ParquetLoadStats stats = new ParquetLoadStats();
+        long startTime = System.currentTimeMillis();
+        
+        try {
+            // Utilise la même approche que loadParquetFile mais sans stocker les données
+            Path path = new Path(filePath);
+            Configuration conf = new Configuration();
+            
+            // Configure les paramètres Hadoop, comme dans loadParquetFile
+            conf.set("fs.hdfs.impl.disable.cache", "false");
+            conf.set("parquet.read.support.class", "org.apache.parquet.hadoop.example.GroupReadSupport");
+            conf.set("parquet.filter.record-level.enabled", "true");
+            
+            // Compte les lignes en utilisant le même lecteur que loadParquetFile
+            long rowCount = 0;
+            
+            try (ParquetReader<Group> reader = ParquetReader.builder(new GroupReadSupport(), path)
+                    .withConf(conf)
+                    .build()) {
+                
+                // Parcourt toutes les lignes sans les charger
+                while (reader.read() != null) {
+                    rowCount++;
+                }
+                
+                stats.setRowsProcessed(rowCount);
+                stats.setElapsedTimeMs(System.currentTimeMillis() - startTime);
+                logger.info("Comptage des lignes dans le fichier Parquet '{}': {} lignes en {} ms", 
+                        filePath, rowCount, stats.getElapsedTimeMs());
+            }
+        } catch (Exception e) {
+            logger.error("Erreur lors du comptage des lignes dans le fichier Parquet '{}': {}", 
+                         filePath, e.getMessage());
+            stats.setError(e.getMessage());
+        }
+        
+        return stats;
     }
     
     /**

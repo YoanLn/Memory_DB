@@ -3,7 +3,7 @@
 # This file contains examples of the most common operations in MemoryDB
 ###
 
-@baseUrl = http://localhost:8092
+@baseUrl = http://localhost:8082
 @contentType = application/json
 @parquetFile = /Users/yoanln/MemoryDB/data/test2.parquet
 
@@ -85,12 +85,12 @@ Content-Type: application/json
 <> 2025-04-08T225504.200.json
 
 ###
-POST {{baseUrl}}/api/tables/parquet_file/load-parquet
+POST {{baseUrl}}/api/tables/parquet_file/load-distributed
 Content-Type: {{contentType}}
 
 {
   "filePath": "{{parquetFile}}",
-  "rowLimit": 10000000,
+  "rowLimit": 3,
   "batchSize": 100000
 }
 
@@ -138,13 +138,6 @@ Content-Type: {{contentType}}
 {
   "tableName": "parquet_file",
   "columns": ["pickup_datetime", "dropoff_datetime", "trip_miles", "trip_time", "base_passenger_fare"],
-  "conditions": [
-    {
-      "columnName": "trip_miles",
-      "operator": "GREATER_THAN",
-      "value": 10.0
-    }
-  ],
   "orderBy": [
     {
       "column": "trip_miles",

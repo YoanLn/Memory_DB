@@ -149,11 +149,29 @@ public class ClusterManager {
     }
     
     /**
+     * Exécute une requête transmise par un autre nœud (locale uniquement)
+     * @param query La requête à exécuter
+     * @return Les résultats locaux
+     */
+    public List<Map<String, Object>> executeForwardedQuery(Query query) {
+        logger.info("Exécution d'une requête transmise localement sur la table '{}'", query.getTableName());
+        return executeDistributedQuery(query, true);
+    }
+    
+    /**
      * Exécute une requête distribuée sur tous les nœuds du cluster
      * @param query La requête à exécuter
+     * @param isForwarded Indique si la requête est déjà transmise d'un autre nœud
      * @return Les résultats agrégés
      */
-    public List<Map<String, Object>> executeDistributedQuery(Query query) {
+    public List<Map<String, Object>> executeDistributedQuery(Query query, boolean isForwarded) {
+        // Prévention des boucles de récursion infinies entre les nœuds
+        if (isForwarded) {
+            logger.info("Exécution d'une requête locale (transmise) sur la table '{}'", query.getTableName());
+            // Effectue la requête uniquement localement si elle a été transmise par un autre nœud
+            return databaseContext.executeQuery(query);
+        }
+        
         logger.info("Exécution d'une requête distribuée sur la table '{}'", query.getTableName());
         
         List<Map<String, Object>> localResults = databaseContext.executeQuery(query);
@@ -163,8 +181,8 @@ public class ClusterManager {
         for (NodeInfo node : getAllNodes()) {
             if (!node.getId().equals(localNode.getId())) {
                 try {
-                    // Utilise le client HTTP pour exécuter la requête
-                    List<Map<String, Object>> remoteResults = NodeClient.executeQuery(node, query);
+                    // Utilise le client HTTP pour exécuter la requête avec le flag isForwarded=true
+                    List<Map<String, Object>> remoteResults = NodeClient.executeForwardedQuery(node, query);
                     aggregatedResults.addAll(remoteResults);
                     logger.info("Requête exécutée avec succès sur le nœud {}, {} résultats récupérés", 
                             node.getId(), remoteResults.size());

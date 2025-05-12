@@ -5,11 +5,18 @@ import com.memorydb.core.Column;
 import com.memorydb.core.DatabaseContext;
 import com.memorydb.core.Table;
 import com.memorydb.distribution.ClusterManager;
+import com.memorydb.distribution.DistributedParquetLoader;
+import com.memorydb.parquet.ParquetLoadOptions;
 import com.memorydb.parquet.ParquetLoader;
+import com.memorydb.parquet.ParquetLoadStats;
+import com.memorydb.parquet.VectorizedParquetLoader;
 import com.memorydb.rest.dto.ColumnDto;
 import com.memorydb.rest.dto.TableDto;
 import com.memorydb.storage.ColumnStore;
 import com.memorydb.storage.TableData;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.enterprise.context.ApplicationScoped;
 import javax.inject.Inject;
@@ -30,6 +37,8 @@ import java.util.Map;
 @Consumes(MediaType.APPLICATION_JSON)
 public class TableResource {
     
+    private static final Logger logger = LoggerFactory.getLogger(TableResource.class);
+    
     @Inject
     private DatabaseContext databaseContext;
     
@@ -38,6 +47,12 @@ public class TableResource {
     
     @Inject
     private ParquetLoader parquetLoader;
+    
+    @Inject
+    private VectorizedParquetLoader vectorizedParquetLoader;
+    
+    @Inject
+    private DistributedParquetLoader distributedParquetLoader;
     
     /**
      * Crée une nouvelle table
@@ -575,6 +590,334 @@ public class TableResource {
         } catch (Exception e) {
             return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
                     .entity("Erreur lors de la récupération des statistiques: " + e.getMessage())
+                    .build();
+        }
+    }
+    
+    /**
+     * Charge un fichier Parquet dans une table existante en mode distribué
+     * Les données sont réparties entre les nœuds du cluster en round-robin
+     * @param tableName Le nom de la table
+     * @param payload Les informations pour le chargement distribué
+     * @return La réponse HTTP
+     */
+    @POST
+    @Path("/{tableName}/load-distributed")
+    public Response loadDistributedParquet(
+            @PathParam("tableName") String tableName,
+            Map<String, Object> payload) {
+        try {
+            // Vérifie que le chemin du fichier est spécifié
+            if (!payload.containsKey("filePath") || payload.get("filePath") == null) {
+                return Response.status(Response.Status.BAD_REQUEST)
+                        .entity("Le chemin du fichier est obligatoire")
+                        .build();
+            }
+            
+            // Vérifie que la table existe
+            if (!databaseContext.tableExists(tableName)) {
+                return Response.status(Response.Status.NOT_FOUND)
+                        .entity("Table inconnue: " + tableName)
+                        .build();
+            }
+            
+            String filePath = payload.get("filePath").toString();
+            
+            // Options de chargement optimisées pour la mémoire
+            ParquetLoadOptions options = new ParquetLoadOptions();
+            
+            // Paramètres optionnels
+            if (payload.containsKey("batchSize")) {
+                options.setBatchSize(((Number) payload.get("batchSize")).intValue());
+            } else {
+                // Taille de batch par défaut optimisée pour réduire la consommation mémoire
+                options.setBatchSize(5000); 
+            }
+            
+            if (payload.containsKey("rowLimit")) {
+                options.setRowLimit(((Number) payload.get("rowLimit")).longValue());
+            }
+            
+            if (payload.containsKey("timeoutSeconds")) {
+                options.setTimeoutSeconds(((Number) payload.get("timeoutSeconds")).intValue());
+            }
+            
+            // Force l'utilisation de l'accès direct pour bénéficier des optimisations mémoire
+            options.setUseDirectAccess(true);
+            
+            // Parallelism pour optimiser le chargement
+            if (payload.containsKey("parallelism")) {
+                options.setParallelism(((Number) payload.get("parallelism")).intValue());
+            }
+            
+            // Utilise le DistributedParquetLoader pour répartir les données entre les nœuds
+            Map<String, Long> distributionStats;
+            try {
+                distributionStats = distributedParquetLoader.loadDistributed(tableName, filePath, options);
+            } catch (Exception e) {
+                return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+                        .entity("Erreur lors du chargement distribué: " + e.getMessage())
+                        .build();
+            }
+            
+            // Calcule le total des lignes chargées
+            long totalRows = 0;
+            for (Long count : distributionStats.values()) {
+                totalRows += count;
+            }
+            
+            // Construit la réponse
+            Map<String, Object> response = new HashMap<>();
+            response.put("tableName", tableName);
+            response.put("filePath", filePath);
+            response.put("totalRowsLoaded", totalRows);
+            response.put("distributionStats", distributionStats);
+            response.put("message", "Fichier Parquet chargé avec succès en mode distribué");
+            
+            return Response.ok(response).build();
+            
+        } catch (Exception e) {
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+                    .entity("Erreur lors du chargement distribué: " + e.getMessage())
+                    .build();
+        }
+    }
+    
+    /**
+     * Endpoint pour charger un segment spécifique d'un fichier Parquet
+     * Utilisé par le mécanisme de distribution pour déléguer le chargement d'un segment à un nœud
+     * 
+     * @param tableName Le nom de la table
+     * @param payload Les paramètres du segment à charger (filePath, startRow, rowCount, etc.)
+     * @return La réponse HTTP avec le nombre de lignes chargées
+     */
+    @POST
+    @Path("/{tableName}/load-parquet-segment")
+    public Response loadParquetSegment(
+            @PathParam("tableName") String tableName,
+            Map<String, Object> payload) {
+        try {
+            // Vérifications des paramètres
+            if (!payload.containsKey("filePath")) {
+                return Response.status(Response.Status.BAD_REQUEST)
+                        .entity("Le chemin du fichier est obligatoire")
+                        .build();
+            }
+            
+            // Vérifie les paramètres de filtrage modulo (nouvelle approche)
+            if (!payload.containsKey("nodeIndex") || !payload.containsKey("nodeCount")) {
+                return Response.status(Response.Status.BAD_REQUEST)
+                        .entity("Les paramètres de filtrage nodeIndex et nodeCount sont obligatoires")
+                        .build();
+            }
+            
+            // Vérifie que la table existe
+            if (!databaseContext.tableExists(tableName)) {
+                return Response.status(Response.Status.NOT_FOUND)
+                        .entity("Table inconnue: " + tableName)
+                        .build();
+            }
+            
+            String filePath = payload.get("filePath").toString();
+            
+            // Récupère les paramètres de filtrage modulo
+            int nodeIndex = ((Number) payload.get("nodeIndex")).intValue();
+            int nodeCount = ((Number) payload.get("nodeCount")).intValue();
+            
+            logger.info("Chargement avec filtrage modulo: nodeIndex={}, nodeCount={} pour la table {}", 
+                    nodeIndex, nodeCount, tableName);
+            
+            // Options optimisées pour la mémoire
+            ParquetLoadOptions options = new ParquetLoadOptions();
+            
+            // Configure le filtrage modulo
+            Map<String, Object> filterOptions = new HashMap<>();
+            filterOptions.put("nodeIndex", nodeIndex);
+            filterOptions.put("nodeCount", nodeCount);
+            options.setFilterOptions(filterOptions);
+            
+            // Paramètres optionnels
+            if (payload.containsKey("rowLimit")) {
+                options.setRowLimit(((Number) payload.get("rowLimit")).longValue());
+            }
+            
+            if (payload.containsKey("batchSize")) {
+                options.setBatchSize(((Number) payload.get("batchSize")).intValue());
+            }
+            
+            // Force l'utilisation des optimisations de mémoire
+            options.setUseDirectAccess(true);
+            
+            if (payload.containsKey("parallelism")) {
+                options.setParallelism(((Number) payload.get("parallelism")).intValue());
+            }
+            
+            // Charge le segment de fichier avec les optimisations mémoire
+            long loadedRows;
+            try {
+                // Utilise VectorizedParquetLoader qui supporte ParquetLoadOptions
+                ParquetLoadStats stats = vectorizedParquetLoader.loadParquetFile(tableName, filePath, options);
+                loadedRows = stats.getRowsProcessed();
+            } catch (Exception e) {
+                return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+                        .entity("Erreur lors du chargement du segment: " + e.getMessage())
+                        .build();
+            }
+            
+            // Construit la réponse
+            Map<String, Object> response = new HashMap<>();
+            response.put("tableName", tableName);
+            response.put("nodeIndex", nodeIndex);
+            response.put("nodeCount", nodeCount);
+            response.put("loadedRows", loadedRows);
+            response.put("message", "Segment Parquet chargé avec succès par filtrage modulo");
+            
+            return Response.ok(response).build();
+            
+        } catch (Exception e) {
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+                    .entity("Erreur lors du chargement du segment: " + e.getMessage())
+                    .build();
+        }
+    }
+    
+    /**
+     * Endpoint pour charger une ligne spécifique d'un fichier Parquet
+     * Utilisé par le mécanisme de distribution pour répartir les lignes entre les nœuds
+     * 
+     * @param tableName Le nom de la table
+     * @param payload Les paramètres (filePath, rowIndex)
+     * @return La réponse HTTP indiquant si le chargement a réussi
+     */
+    @POST
+    @Path("/{tableName}/load-specific-row")
+    public Response loadSpecificRow(
+            @PathParam("tableName") String tableName,
+            Map<String, Object> payload) {
+        try {
+            // Vérifications des paramètres
+            if (!payload.containsKey("filePath") || !payload.containsKey("rowIndex")) {
+                return Response.status(Response.Status.BAD_REQUEST)
+                        .entity("Les paramètres filePath et rowIndex sont obligatoires")
+                        .build();
+            }
+            
+            // Vérifie que la table existe
+            if (!databaseContext.tableExists(tableName)) {
+                return Response.status(Response.Status.NOT_FOUND)
+                        .entity("Table inconnue: " + tableName)
+                        .build();
+            }
+            
+            String filePath = payload.get("filePath").toString();
+            int rowIndex = ((Number) payload.get("rowIndex")).intValue();
+            
+            logger.info("Chargement de la ligne {} du fichier {} dans la table {}",
+                    rowIndex, filePath, tableName);
+            
+            // Charge la ligne spécifique 
+            ParquetLoadStats stats;
+            try {
+                stats = vectorizedParquetLoader.loadSpecificRow(tableName, filePath, rowIndex);
+            } catch (Exception e) {
+                logger.error("Erreur lors du chargement de la ligne {}: {}", rowIndex, e.getMessage());
+                return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+                        .entity("Erreur lors du chargement de la ligne: " + e.getMessage())
+                        .build();
+            }
+            
+            // Construit la réponse
+            Map<String, Object> response = new HashMap<>();
+            response.put("tableName", tableName);
+            response.put("rowIndex", rowIndex);
+            response.put("loaded", stats.getRowsProcessed() > 0);
+            response.put("message", stats.getRowsProcessed() > 0 ?
+                    "Ligne chargée avec succès" : "Ligne non trouvée ou déjà chargée");
+            
+            return Response.ok(response).build();
+            
+        } catch (Exception e) {
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+                    .entity("Erreur lors du chargement de la ligne: " + e.getMessage())
+                    .build();
+        }
+    }
+    
+    /**
+     * Endpoint pour charger une plage de lignes d'un fichier Parquet
+     * Optimisé pour les grands volumes de données en mode distribué
+     * 
+     * @param tableName Le nom de la table
+     * @param payload Les paramètres (filePath, startRow, rowCount, batchSize)
+     * @return La réponse HTTP indiquant si le chargement a réussi
+     */
+    @POST
+    @Path("/{tableName}/load-range")
+    public Response loadRange(
+            @PathParam("tableName") String tableName,
+            Map<String, Object> payload) {
+        try {
+            // Vérifications des paramètres
+            if (!payload.containsKey("filePath") || !payload.containsKey("startRow") || 
+                !payload.containsKey("rowCount")) {
+                return Response.status(Response.Status.BAD_REQUEST)
+                        .entity("Les paramètres filePath, startRow et rowCount sont obligatoires")
+                        .build();
+            }
+            
+            // Vérifie que la table existe
+            if (!databaseContext.tableExists(tableName)) {
+                return Response.status(Response.Status.NOT_FOUND)
+                        .entity("Table inconnue: " + tableName)
+                        .build();
+            }
+            
+            // Extraction des paramètres
+            String filePath = payload.get("filePath").toString();
+            int startRow = ((Number) payload.get("startRow")).intValue();
+            int rowCount = ((Number) payload.get("rowCount")).intValue();
+            int batchSize = payload.containsKey("batchSize") ? 
+                    ((Number) payload.get("batchSize")).intValue() : 10000;
+            
+            logger.info("Chargement optimisé d'une plage de {} lignes à partir de l'index {} du fichier {}",
+                    rowCount, startRow, filePath);
+            
+            // Prépare les options de chargement
+            ParquetLoadOptions options = new ParquetLoadOptions();
+            options.setBatchSize(batchSize);
+            options.setSkipRows(startRow);
+            options.setRowLimit(rowCount);
+            
+            // Charge les données
+            ParquetLoadStats stats;
+            try {
+                long startTime = System.currentTimeMillis();
+                stats = vectorizedParquetLoader.loadParquetFile(tableName, filePath, options);
+                long duration = System.currentTimeMillis() - startTime;
+                
+                logger.info("Plage de lignes chargée avec succès: {} lignes en {} ms", 
+                        stats.getRowsProcessed(), duration);
+            } catch (Exception e) {
+                logger.error("Erreur lors du chargement de la plage de lignes: {}", e.getMessage());
+                return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+                        .entity("Erreur lors du chargement de la plage: " + e.getMessage())
+                        .build();
+            }
+            
+            // Construit la réponse
+            Map<String, Object> response = new HashMap<>();
+            response.put("tableName", tableName);
+            response.put("startRow", startRow);
+            response.put("requestedCount", rowCount);
+            response.put("loadedRows", stats.getRowsProcessed());
+            response.put("elapsedMs", stats.getElapsedTimeMs());
+            response.put("message", "Plage de lignes chargée avec succès");
+            
+            return Response.ok(response).build();
+            
+        } catch (Exception e) {
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+                    .entity("Erreur lors du chargement de la plage: " + e.getMessage())
                     .build();
         }
     }

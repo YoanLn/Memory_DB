@@ -1,5 +1,7 @@
 package com.memorydb.parquet;
 
+import java.util.Map;
+
 /**
  * Options avancées pour le chargement de fichiers Parquet
  */
@@ -9,6 +11,8 @@ public class ParquetLoadOptions {
     private int timeoutSeconds = 0; // Pas de timeout par défaut
     private boolean useDirectAccess = true; // Utiliser l'accès direct aux colonnes
     private int parallelism = Runtime.getRuntime().availableProcessors(); // Parallélisme par défaut
+    private Map<String, Object> filterOptions = null; // Options de filtrage (pour la distribution)
+    private int skipRows = 0; // Nombre de lignes à sauter au début
     
     /**
      * Constructeur par défaut
@@ -124,6 +128,43 @@ public class ParquetLoadOptions {
      */
     public ParquetLoadOptions setParallelism(int parallelism) {
         this.parallelism = parallelism;
+        return this;
+    }
+    
+    /**
+     * Définit les options de filtrage pour la distribution
+     * @param filterOptions Options de filtrage (par exemple, nodeIndex et nodeCount pour filtrage modulo)
+     * @return L'instance courante pour chaînage
+     */
+    public ParquetLoadOptions setFilterOptions(Map<String, Object> filterOptions) {
+        this.filterOptions = filterOptions;
+        return this;
+    }
+    
+    /**
+     * Obtient les options de filtrage
+     * @return Options de filtrage ou null si non définies
+     */
+    public Map<String, Object> getFilterOptions() {
+        return filterOptions;
+    }
+    
+    /**
+     * Obtient le nombre de lignes à sauter au début du fichier
+     * @return Nombre de lignes à sauter
+     */
+    public int getSkipRows() {
+        return skipRows;
+    }
+    
+    /**
+     * Définit le nombre de lignes à sauter au début du fichier
+     * Utile pour charger une plage spécifique lors d'un chargement distribué
+     * @param skipRows Nombre de lignes à sauter
+     * @return L'instance courante pour chaînage
+     */
+    public ParquetLoadOptions setSkipRows(int skipRows) {
+        this.skipRows = skipRows;
         return this;
     }
 }

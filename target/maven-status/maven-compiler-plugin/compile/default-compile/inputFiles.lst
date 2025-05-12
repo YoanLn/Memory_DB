@@ -1,12 +1,12 @@
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/util/ObjectPools.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/rest/dto/ColumnDto.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/distribution/NodeClient.java
-/Users/yoanln/MemoryDB/src/main/java/com/memorydb/compression/ColumnCompressor.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/rest/ClusterResource.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/system/BootstrapService.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/query/QueryExecutor.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/rest/QueryResource.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/ApplicationLifecycle.java
+/Users/yoanln/MemoryDB/src/main/java/com/memorydb/distribution/DistributedParquetLoader.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/parquet/ParquetLoader.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/rest/dto/QueryResultDto.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/storage/TableData.java
@@ -26,8 +26,6 @@
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/distribution/NodeInfo.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/common/DataType.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/query/Condition.java
-/Users/yoanln/MemoryDB/src/main/java/com/memorydb/storage/TableStorageOptions.java
-/Users/yoanln/MemoryDB/src/main/java/com/memorydb/storage/MemoryMappedStore.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/distribution/NodeDiscovery.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/distribution/Node.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/query/Query.java
@@ -42,5 +40,4 @@
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/parquet/ParquetLoadStats.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/parquet/ParquetLoadOptions.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/query/AggregateFunction.java
-/Users/yoanln/MemoryDB/src/main/java/com/memorydb/storage/OptimizedColumnStore.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/parquet/ParquetSchemaReader.java

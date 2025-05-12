@@ -52,6 +52,10 @@ public class QueryResource {
      */
     @POST
     public Response executeQuery(QueryDto queryDto) {
+        // Pour compatibilité ascendante, active la distribution par défaut
+        if (queryDto.isDistributed() == false) {
+            queryDto.setDistributed(true);
+        }
         try {
             // Vérifie que le nom de la table est valide
             if (queryDto.getTableName() == null || queryDto.getTableName().isEmpty()) {
@@ -68,12 +72,17 @@ public class QueryResource {
                         .build();
             }
             
-            // Si le paramètre 'distributed' est true, utilise l'implémentation distribuée
-            if (queryDto.isDistributed()) {
+            // OPTIMISATION: Par défaut, toutes les requêtes sont maintenant distribuées,
+            // sauf si explicitement demandé à ne pas l'être avec distributed=false
+            if (!Boolean.FALSE.equals(queryDto.isDistributed())) {
+                logger.info("Exécution d'une requête en mode distribué sur la table: {}", tableName);
                 // Convertit le DTO en objet Query pour l'exécution distribuée
                 Query query = convertDtoToQuery(queryDto);
-                List<Map<String, Object>> results = clusterManager.executeDistributedQuery(query);
+                // Appel avec le paramètre isForwarded=false pour indiquer qu'il s'agit d'une requête initiale
+                List<Map<String, Object>> results = clusterManager.executeDistributedQuery(query, false);
                 return Response.ok(results).build();
+            } else {
+                logger.info("Exécution d'une requête en mode local uniquement sur la table: {}", tableName);
             }
             
             // Implémentation simplifiée pour l'exécution locale (contourne le QueryExecutor)
@@ -763,5 +772,44 @@ public class QueryResource {
         }
         
         return query;
+    }
+    
+    /**
+     * Endpoint pour traiter les requêtes transmises (forwarded) par d'autres nœuds.
+     * Cet endpoint est utilisé pour éviter les boucles de requêtes infinies entre les nœuds.
+     * @param queryDto La requête à exécuter localement
+     * @return Les résultats de la requête exécutée uniquement sur ce nœud
+     */
+    @POST
+    @Path("/forwarded")
+    public Response executeForwardedQuery(QueryDto queryDto) {
+        try {
+            logger.info("Requête transmise reçue pour la table: {}", queryDto.getTableName());
+            
+            // Vérifie que le nom de la table est valide
+            if (queryDto.getTableName() == null || queryDto.getTableName().isEmpty()) {
+                return Response.status(Response.Status.BAD_REQUEST)
+                        .entity("Le nom de la table est obligatoire")
+                        .build();
+            }
+            
+            // Vérifie que la table existe
+            String tableName = queryDto.getTableName();
+            if (!databaseContext.tableExists(tableName)) {
+                return Response.status(Response.Status.NOT_FOUND)
+                        .entity("Table inconnue: " + tableName)
+                        .build();
+            }
+            
+            // Exécute la requête uniquement localement via l'API spéciale
+            Query query = convertDtoToQuery(queryDto);
+            List<Map<String, Object>> results = clusterManager.executeForwardedQuery(query);
+            return Response.ok(results).build();
+        } catch (Exception e) {
+            logger.error("Erreur lors de l'exécution de la requête transmise: {}", e.getMessage());
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+                    .entity("Erreur: " + e.getMessage())
+                    .build();
+        }
     }
 } 

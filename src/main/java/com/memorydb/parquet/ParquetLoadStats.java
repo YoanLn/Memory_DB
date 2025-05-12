@@ -38,6 +38,14 @@ public class ParquetLoadStats {
     }
     
     /**
+     * Incrémente le nombre de lignes traitées
+     * @param count Nombre de lignes à ajouter
+     */
+    public void incrementRowsProcessed(long count) {
+        this.rowsProcessed += count;
+    }
+    
+    /**
      * Obtient le nombre de batchs traités
      * @return Nombre de batchs
      */
