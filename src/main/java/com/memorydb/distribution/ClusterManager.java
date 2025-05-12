@@ -151,9 +151,10 @@ public class ClusterManager {
     /**
      * Exécute une requête distribuée sur tous les nœuds du cluster
      * @param query La requête à exécuter
+     * @param queryDto Le DTO de la requête (contient des flags supplémentaires)
      * @return Les résultats agrégés
      */
-    public List<Map<String, Object>> executeDistributedQuery(Query query) {
+    public List<Map<String, Object>> executeDistributedQuery(Query query, com.memorydb.rest.dto.QueryDto queryDto) {
         logger.info("Exécution d'une requête distribuée sur la table '{}'", query.getTableName());
         
         List<Map<String, Object>> localResults = databaseContext.executeQuery(query);
@@ -163,8 +164,11 @@ public class ClusterManager {
         for (NodeInfo node : getAllNodes()) {
             if (!node.getId().equals(localNode.getId())) {
                 try {
-                    // Utilise le client HTTP pour exécuter la requête
-                    List<Map<String, Object>> remoteResults = NodeClient.executeQuery(node, query);
+                    // Marque la requête comme transmise pour éviter les boucles infinies
+                    queryDto.setForwardedQuery(true);
+                    
+                    // Utilise le client HTTP pour exécuter la requête sur le nœud distant
+                    List<Map<String, Object>> remoteResults = NodeClient.executeQuery(node, query, queryDto);
                     aggregatedResults.addAll(remoteResults);
                     logger.info("Requête exécutée avec succès sur le nœud {}, {} résultats récupérés", 
                             node.getId(), remoteResults.size());

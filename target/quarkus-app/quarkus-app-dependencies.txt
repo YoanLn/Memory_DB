@@ -33,12 +33,14 @@ com.nimbusds:nimbus-jose-jwt::jar:9.27
 com.squareup.okhttp3:okhttp::jar:3.14.9
 com.squareup.okio:okio::jar:1.17.2
 com.sun.activation:jakarta.activation::jar:1.2.1
+com.sun.istack:istack-commons-runtime::jar:3.0.10
 com.sun.jersey.contribs:jersey-guice::jar:1.19
 com.sun.jersey:jersey-client::jar:1.19
 com.sun.jersey:jersey-core::jar:1.19
 com.sun.jersey:jersey-json::jar:1.19
 com.sun.jersey:jersey-server::jar:1.19
 com.sun.jersey:jersey-servlet::jar:1.19
+com.sun.mail:jakarta.mail::jar:1.6.7
 com.sun.xml.bind:jaxb-impl::jar:2.2.3-1
 commons-beanutils:commons-beanutils::jar:1.9.4
 commons-cli:commons-cli::jar:1.2
@@ -84,6 +86,7 @@ io.quarkus:quarkus-rest-client-config::jar:2.16.5.Final
 io.quarkus:quarkus-rest-client::jar:2.16.5.Final
 io.quarkus:quarkus-resteasy-common::jar:2.16.5.Final
 io.quarkus:quarkus-resteasy-jackson::jar:2.16.5.Final
+io.quarkus:quarkus-resteasy-multipart::jar:2.16.5.Final
 io.quarkus:quarkus-resteasy-server-common::jar:2.16.5.Final
 io.quarkus:quarkus-resteasy::jar:2.16.5.Final
 io.quarkus:quarkus-security-runtime-spi::jar:2.16.5.Final
@@ -166,6 +169,9 @@ org.apache.httpcomponents:httpasyncclient::jar:4.1.5
 org.apache.httpcomponents:httpclient::jar:4.5.14
 org.apache.httpcomponents:httpcore-nio::jar:4.4.16
 org.apache.httpcomponents:httpcore::jar:4.4.16
+org.apache.james:apache-mime4j-core::jar:0.8.3
+org.apache.james:apache-mime4j-dom::jar:0.8.3
+org.apache.james:apache-mime4j-storage::jar:0.8.3
 org.apache.kerby:kerb-admin::jar:1.0.1
 org.apache.kerby:kerb-client::jar:1.0.1
 org.apache.kerby:kerb-common::jar:1.0.1
@@ -213,6 +219,8 @@ org.eclipse.jetty:jetty-xml::jar:9.4.43.v20210629
 org.eclipse.microprofile.config:microprofile-config-api::jar:2.0.1
 org.eclipse.microprofile.context-propagation:microprofile-context-propagation-api::jar:1.2
 org.eclipse.microprofile.rest.client:microprofile-rest-client-api::jar:2.0
+org.glassfish.jaxb:jaxb-runtime::jar:2.3.3-b02
+org.glassfish.jaxb:txw2::jar:2.3.3-b02
 org.graalvm.sdk:graal-sdk::jar:22.3.0
 org.jboss.logging:commons-logging-jboss-logging::jar:1.0.0.Final
 org.jboss.logging:jboss-logging-annotations::jar:2.2.1.Final
@@ -226,6 +234,8 @@ org.jboss.resteasy:resteasy-client::jar:4.7.7.Final
 org.jboss.resteasy:resteasy-core-spi::jar:4.7.7.Final
 org.jboss.resteasy:resteasy-core::jar:4.7.7.Final
 org.jboss.resteasy:resteasy-jackson2-provider::jar:4.7.7.Final
+org.jboss.resteasy:resteasy-jaxb-provider::jar:4.7.7.Final
+org.jboss.resteasy:resteasy-multipart-provider::jar:4.7.7.Final
 org.jboss.slf4j:slf4j-jboss-logmanager::jar:1.2.0.Final
 org.jboss.spec.javax.ws.rs:jboss-jaxrs-api_2.1_spec::jar:2.0.1.Final
 org.jboss.spec.javax.xml.bind:jboss-jaxb-api_2.3_spec::jar:2.0.0.Final

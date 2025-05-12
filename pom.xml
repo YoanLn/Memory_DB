@@ -53,11 +53,10 @@
             <artifactId>quarkus-core</artifactId>
         </dependency>
         
-        <!-- RESTEasy Multipart pour le téléchargement de fichiers -->
+        <!-- RESTEasy Multipart pour le téléchargement de fichiers (version Quarkus) -->
         <dependency>
-            <groupId>org.jboss.resteasy</groupId>
-            <artifactId>resteasy-multipart-provider</artifactId>
-            <version>4.7.5.Final</version>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-resteasy-multipart</artifactId>
         </dependency>
 
         <!-- Parquet -->

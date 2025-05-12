@@ -15,7 +15,7 @@ import com.memorydb.rest.dto.TableDto;
 import com.memorydb.storage.ColumnStore;
 import com.memorydb.storage.TableData;
 
-// Imports standard multipart pour quarkus
+import org.jboss.resteasy.annotations.providers.multipart.MultipartForm;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -28,8 +28,7 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.nio.file.Files;
-import java.nio.file.Paths;
+
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -942,7 +941,7 @@ public class TableResource {
     @Produces(MediaType.APPLICATION_JSON)
     public Response loadDistributedWithUpload(
             @PathParam("tableName") String tableName,
-            DistributedParquetUploadForm form) {
+            @MultipartForm DistributedParquetUploadForm form) {
         try {
             // Vérifie que la table existe
             if (!databaseContext.tableExists(tableName)) {
@@ -1024,6 +1023,83 @@ public class TableResource {
     }
     
     /**
+     * Endpoint pour charger un fichier Parquet via son chemin et le distribuer entre les nœuds
+     * Compatible avec l'ancien format JSON qui spécifie un chemin de fichier local
+     * @param tableName Le nom de la table
+     * @param payload Les informations pour le chargement distribué
+     * @return La réponse HTTP indiquant si le chargement a réussi
+     */
+    @POST
+    @Path("/{tableName}/load-distributed-upload")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response loadDistributedWithPath(
+            @PathParam("tableName") String tableName,
+            ParquetLoadRequest payload) {
+        try {
+            // Vérifie que la table existe
+            if (!databaseContext.tableExists(tableName)) {
+                return Response.status(Response.Status.NOT_FOUND)
+                        .entity("Table inconnue: " + tableName)
+                        .build();
+            }
+            
+            if (payload.filePath == null && payload.file == null) {
+                return Response.status(Response.Status.BAD_REQUEST)
+                        .entity("Le chemin du fichier Parquet est obligatoire (filePath ou file)")
+                        .build();
+            }
+            
+            // Utilisation du champ filePath ou file (pour compatibilité)
+            String filePath = payload.filePath != null ? payload.filePath : payload.file;
+            
+            // Vérifier que le fichier existe
+            File file = new File(filePath);
+            if (!file.exists() || !file.isFile()) {
+                return Response.status(Response.Status.BAD_REQUEST)
+                        .entity("Le fichier Parquet n'existe pas: " + filePath)
+                        .build();
+            }
+            
+            // Options de chargement
+            ParquetLoadOptions options = new ParquetLoadOptions();
+            options.setRowLimit(payload.rowLimit);
+            options.setBatchSize(payload.batchSize);
+            
+            // Chargement distribué
+            Map<String, Long> distributionStats;
+            long startTime = System.currentTimeMillis();
+            try {
+                // Utilisation du chargeur distribué
+                distributionStats = distributedParquetLoader.loadDistributed(tableName, filePath, options);
+                long duration = System.currentTimeMillis() - startTime;
+                logger.info("Fichier distribué et chargé avec succès en {} ms", duration);
+            } catch (Exception e) {
+                logger.error("Erreur lors du chargement distribué: {}", e.getMessage());
+                return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+                        .entity("Erreur lors du chargement distribué: " + e.getMessage())
+                        .build();
+            }
+            
+            // Construction de la réponse
+            Map<String, Object> result = new HashMap<>();
+            result.put("tableName", tableName);
+            result.put("distributionStats", distributionStats);
+            result.put("totalRowsLoaded", 
+                    distributionStats.values().stream().mapToLong(Long::longValue).sum());
+            result.put("message", "Fichier Parquet chargé avec succès en mode distribué");
+            result.put("elapsedMs", System.currentTimeMillis() - startTime);
+            
+            return Response.ok(result).build();
+        } catch (Exception e) {
+            logger.error("Erreur lors du chargement distribué avec un chemin: {}", e.getMessage(), e);
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+                    .entity("Erreur: " + e.getMessage())
+                    .build();
+        }
+    }
+    
+    /**
      * Méthode utilitaire pour sauvegarder le fichier téléchargé
      * @param inputStream Le flux d'entrée du fichier
      * @return Le fichier temporaire créé
@@ -1039,4 +1115,14 @@ public class TableResource {
         }
         return tempFile;
     }
-} 
+
+    /**
+     * Classe de requête pour le chargement de fichiers Parquet
+     */
+    static class ParquetLoadRequest {
+        public String filePath;
+        public String file; // Alias pour filePath (pour compatibilité)
+        public long rowLimit = -1;
+        public int batchSize = 100000;
+    }
+}

@@ -134,6 +134,38 @@ public class NodeClient {
                     query.getLimit()
             );
             
+            // Par défaut, c'est une requête distribuée
+            queryDto.setDistributed(true);
+            
+            // Envoie la demande
+            Response response = client.target(url)
+                    .request(MediaType.APPLICATION_JSON)
+                    .post(Entity.entity(queryDto, MediaType.APPLICATION_JSON));
+            
+            if (response.getStatus() == Response.Status.OK.getStatusCode()) {
+                return response.readEntity(new GenericType<List<Map<String, Object>>>() {});
+            } else {
+                logger.error("Échec de l'exécution de la requête sur le nœud {}: {} - {}", 
+                        node.getId(), response.getStatus(), response.readEntity(String.class));
+                return new ArrayList<>();
+            }
+        } catch (Exception e) {
+            logger.error("Erreur lors de l'exécution de la requête sur le nœud {}: {}", 
+                    node.getId(), e.getMessage());
+            return new ArrayList<>();
+        }
+    }
+    
+    /**
+     * Exécute une requête sur un nœud distant en utilisant un DTO existant
+     * @param node Le nœud distant
+     * @param queryDto La requête à exécuter
+     * @return La liste des résultats
+     */
+    public static List<Map<String, Object>> executeQuery(NodeInfo node, QueryDto queryDto) {
+        try {
+            String url = String.format("http://%s:%d/api/query", node.getAddress(), node.getPort());
+            
             // Envoie la demande
             Response response = client.target(url)
                     .request(MediaType.APPLICATION_JSON)
@@ -285,4 +317,66 @@ public class NodeClient {
             return false;
         }
     }
-} 
+ /**
+ * Exécute une requête sur un nœud distant en passant l'objet Query et QueryDto séparément
+ * @param node Le nœud distant
+ * @param query L'objet Query contenant les détails de la requête
+ * @param originalQueryDto Le DTO original avec les flags de contrôle
+ * @return La liste des résultats
+ */
+public static List<Map<String, Object>> executeQuery(NodeInfo node, Query query, QueryDto originalQueryDto) {
+    try {
+        String url = String.format("http://%s:%d/api/query", node.getAddress(), node.getPort());
+        
+        // Convertit les conditions en ConditionDto
+        List<ConditionDto> conditionDtos = null;
+        if (query.getConditions() != null && !query.getConditions().isEmpty()) {
+            conditionDtos = query.getConditions().stream()
+                    .map(condition -> {
+                        Condition.Operator operator = condition.getOperator();
+                        String operatorStr = operator.name();
+                        return new ConditionDto(
+                                condition.getColumnName(),
+                                operatorStr,
+                                condition.getValue());
+                    })
+                    .collect(Collectors.toList());
+        }
+        
+        // Crée un nouveau DTO de requête
+        QueryDto queryDto = new QueryDto(
+                query.getTableName(),
+                query.getColumns(),
+                conditionDtos,
+                query.getOrderBy(),
+                query.isOrderByAscending(),
+                query.getLimit()
+        );
+        
+        // Copie les flags importants du DTO original
+        queryDto.setDistributed(originalQueryDto.isDistributed());
+        queryDto.setForwardedQuery(true); // Marque comme requête transmise pour éviter les boucles infinies
+        
+        logger.info("Envoi d'une requête transmise vers le nœud {}", node.getId());
+        
+        // Envoie la demande
+        Response response = client.target(url)
+                .request(MediaType.APPLICATION_JSON)
+                .post(Entity.entity(queryDto, MediaType.APPLICATION_JSON));
+        
+        if (response.getStatus() == Response.Status.OK.getStatusCode()) {
+            List<Map<String, Object>> results = response.readEntity(new GenericType<List<Map<String, Object>>>() {});
+            logger.info("{} résultats reçus du nœud {}", results.size(), node.getId());
+            return results;
+        } else {
+            logger.error("Échec de l'exécution de la requête sur le nœud {}: {} - {}", 
+                    node.getId(), response.getStatus(), response.readEntity(String.class));
+            return new ArrayList<>();
+        }
+    } catch (Exception e) {
+        logger.error("Erreur lors de l'exécution de la requête sur le nœud {}: {}", 
+                node.getId(), e.getMessage());
+        return new ArrayList<>();
+    }
+}
+}

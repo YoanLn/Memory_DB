@@ -29,6 +29,7 @@
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/distribution/NodeDiscovery.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/distribution/Node.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/query/Query.java
+/Users/yoanln/MemoryDB/src/main/java/com/memorydb/rest/DistributedParquetUploadForm.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/MemoryDbApplication.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/rest/ParquetResource.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/index/BitmapIndex.java

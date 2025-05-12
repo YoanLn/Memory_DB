@@ -19,6 +19,11 @@ private String orderByColumn;
 private boolean orderByAscending;
     private int limit;
     private boolean distributed;
+    /**
+     * Flag indiquant si la requête a déjà été transmise à un autre nœud.
+     * Utilisé pour éviter les boucles infinies dans les requêtes distribuées.
+     */
+    private boolean forwardedQuery = false;
     
     /**
      * Constructeur par défaut
@@ -251,5 +256,13 @@ private boolean orderByAscending;
      */
     public void setDistributed(boolean distributed) {
         this.distributed = distributed;
+    }
+    
+    public boolean isForwardedQuery() {
+        return forwardedQuery;
+    }
+    
+    public void setForwardedQuery(boolean forwardedQuery) {
+        this.forwardedQuery = forwardedQuery;
     }
 } 

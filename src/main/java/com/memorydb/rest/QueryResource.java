@@ -68,12 +68,16 @@ public class QueryResource {
                         .build();
             }
             
-            // Si le paramètre 'distributed' est true, utilise l'implémentation distribuée
-            if (queryDto.isDistributed()) {
+            // Gestion des requêtes distribuées
+            if (queryDto.isDistributed() && !queryDto.isForwardedQuery()) {
+                logger.info("Exécution d'une requête distribuée sur la table '{}' depuis le nœud principal", tableName);
                 // Convertit le DTO en objet Query pour l'exécution distribuée
                 Query query = convertDtoToQuery(queryDto);
-                List<Map<String, Object>> results = clusterManager.executeDistributedQuery(query);
+                List<Map<String, Object>> results = clusterManager.executeDistributedQuery(query, queryDto);
                 return Response.ok(results).build();
+            } else if (queryDto.isForwardedQuery()) {
+                // Cette requête a été transmise d'un autre nœud, l'exécuter localement uniquement
+                logger.info("Exécution locale d'une requête transmise pour la table '{}'", tableName);
             }
             
             // Implémentation simplifiée pour l'exécution locale (contourne le QueryExecutor)
