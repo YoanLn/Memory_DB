@@ -16,7 +16,7 @@ PARQUET_FILE="data/test2.parquet"
 # Création d'une table
 create_table() {
   echo "Création de la table parquet_file..."
-  curl -X POST -H "Content-Type: application/json" \
+  curl --noproxy localhost -X POST -H "Content-Type: application/json" \
     -d '{
   "name": "parquet_file",
   "columns": [
@@ -52,20 +52,20 @@ create_table() {
 # Liste des tables
 list_tables() {
   echo "Liste des tables sur le nœud 1:"
-  curl -s http://$NODE1/api/tables | jq '.'
+  curl --noproxy localhost -s http://$NODE1/api/tables | jq '.'
   
   echo "Liste des tables sur le nœud 2:"
-  curl -s http://$NODE2/api/tables | jq '.'
+  curl --noproxy localhost -s http://$NODE2/api/tables | jq '.'
   
   echo "Liste des tables sur le nœud 3:"
-  curl -s http://$NODE3/api/tables | jq '.'
+  curl --noproxy localhost -s http://$NODE3/api/tables | jq '.'
 }
 
 
 # Chargement distribué - Petit nombre de lignes (test)
 load_distributed_small() {
   echo "Chargement distribué avec un petit nombre de lignes (3)..."
-  curl -X POST \
+  curl --noproxy localhost -X POST \
     -F "file=@$PARQUET_FILE" \
     -F "rowLimit=3" \
     -F "batchSize=1000" \
@@ -75,7 +75,7 @@ load_distributed_small() {
 # Chargement distribué - Grand nombre de lignes
 load_distributed_large() {
   echo "Chargement distribué avec un grand nombre de lignes (1000)..."
-  curl -X POST \
+  curl --noproxy localhost -X POST \
     -F "file=@$PARQUET_FILE" \
     -F "rowLimit=1000" \
     -F "batchSize=100000" \
@@ -101,8 +101,11 @@ load_coordinator_only() {
   
   # 1. D'abord, supprimer la table sur tous les nœuds pour repartir proprement
   echo "Suppression de la table sur tous les nœuds..."
-  curl -X DELETE http://$NODE1/api/tables/parquet_file
-  sleep 2
+  curl --noproxy localhost -X DELETE http://$NODE1/api/tables/parquet_file >/dev/null 2>&1
+  curl --noproxy localhost -X DELETE http://$NODE2/api/tables/parquet_file >/dev/null 2>&1
+  if [ "$NODE3" != "" ]; then
+    curl --noproxy localhost -X DELETE http://$NODE3/api/tables/parquet_file >/dev/null 2>&1
+  fi
   
   # 2. Recréer la table sur tous les nœuds
   create_table
@@ -113,7 +116,7 @@ load_coordinator_only() {
   
   # Utilisation de l'option -F avec le chemin absolu complet
   echo "Exécution de: curl -X POST -F \"file=@$file_path\" [...] http://$NODE1/api/tables/parquet_file/load"
-  curl -X POST \
+  curl --noproxy localhost -X POST \
     -F "file=@$file_path" \
     -F "rowLimit=$row_limit" \
     -F "batchSize=1000" \
@@ -127,7 +130,7 @@ load_coordinator_only() {
 # Chargement distribué - Fichier complet
 load_distributed_full() {
   echo "Chargement du fichier Parquet complet en mode distribué..."
-  curl -X POST \
+  curl --noproxy localhost -X POST \
     -F "file=@$PARQUET_FILE" \
     -F "rowLimit=-1" \
     -F "batchSize=100000" \
@@ -137,11 +140,19 @@ load_distributed_full() {
 # Solution pour configuration universitaire avec 2 machines Linux
 # Où une seule machine a le fichier Parquet localement
 university_setup() {
-  # Paramètres
-  local row_limit="${1:-100}"
-  local file_machine="${2:-$NODE1}"  # L'adresse de la machine avec le fichier (par défaut NODE1)
-  local file_path="${3:-$PARQUET_FILE}"  # Chemin du fichier sur la machine source
-  
+  if [ $# -lt 3 ]; then
+    echo "Usage: $0 university-setup <row_limit> <file_machine> <file_path>"
+    echo "Example: $0 university-setup 100 \"localhost:8081\" \"data/test2.parquet\""
+    return 1
+  fi
+
+  local row_limit=$1
+  local file_machine=$2
+  local file_path=$3
+  local node2="localhost:8082"
+  local node3="" # Laisser vide si pas de troisième nœud
+
+  echo "Configuration pour environnement universitaire avec machines distinctes..."
   echo "======================================================================="
   echo "Configuration pour environnement universitaire avec machines distinctes"
   echo "======================================================================="
@@ -150,96 +161,97 @@ university_setup() {
   echo "Nombre de lignes à charger: $row_limit"
   echo ""
   
-  # 1. Vérifie si le fichier existe (uniquement si l'on est sur la machine avec le fichier)
-  local is_file_machine=false
-  if [[ "$file_machine" == "localhost:"* || "$file_machine" == "127.0.0.1:"* ]]; then
-    is_file_machine=true
-    if [ ! -f "$file_path" ]; then
-      echo "ERREUR: Le fichier Parquet n'existe pas à l'emplacement: $file_path"
-      return 1
-    else
-      echo "Fichier trouvé localement: $file_path"
-      # Vérifie la taille du fichier
-      local file_size=$(du -h "$file_path" | cut -f1)
-      echo "Taille du fichier: $file_size"
-    fi
+  # Vérifie si le fichier existe localement
+  if [ -f "$file_path" ]; then
+    echo "Fichier trouvé localement: $file_path"
+    # Affiche la taille du fichier
+    local file_size=$(du -h "$file_path" | cut -f1)
+    echo "Taille du fichier: $file_size"
+    echo ""
   else
-    echo "Supposant que le fichier existe sur la machine distante: $file_machine"
+    echo "Attention: Le fichier $file_path n'existe pas localement."
+    echo "Assurez-vous d'exécuter ce script sur la machine qui contient le fichier."
+    echo ""
   fi
-  
-  echo ""
+
   echo "1. Suppression de la table sur tous les nœuds..."
-  curl -X DELETE http://$NODE1/api/tables/parquet_file
-  curl -X DELETE http://$NODE2/api/tables/parquet_file
-  if [ "$NODE3" != "" ]; then
-    curl -X DELETE http://$NODE3/api/tables/parquet_file
+  curl --noproxy localhost -X DELETE "http://$file_machine/api/tables/parquet_file"
+  curl --noproxy localhost -X DELETE "http://$node2/api/tables/parquet_file"
+  if [ -n "$node3" ]; then
+    curl --noproxy localhost -X DELETE "http://$node3/api/tables/parquet_file"
   fi
-  sleep 2
-  
-  echo ""
+
   echo "2. Création de la table sur tous les nœuds..."
-  create_table
-  sleep 1
-  
+  echo "Création de la table parquet_file..."
+  curl --noproxy localhost -X POST -H "Content-Type: application/json" \
+    -d '{"name":"parquet_file"}' \
+    "http://$file_machine/api/tables"
+
   echo ""
   echo "3. Chargement des données uniquement sur la machine avec le fichier ($file_machine)..."
   # Construit l'URL pour la machine avec le fichier
   local load_url="http://$file_machine/api/tables/parquet_file/load-distributed-upload"
+  # Alternative URL plus simple si l'autre ne fonctionne pas
+  local simple_upload_url="http://$file_machine/api/upload?tableName=parquet_file&limite=$row_limit"
   
   local load_success=false
   
-  # Utiliser une commande curl appropriée selon que nous sommes sur la machine avec le fichier ou non
-  if [ "$is_file_machine" = true ]; then
-    # Nous sommes sur la machine avec le fichier, on peut faire un curl direct avec @file
-    echo "Exécution de: curl -X POST -F \"file=@$file_path\" -F \"rowLimit=$row_limit\" [...] $load_url"
-    curl_output=$(curl -X POST \
+  # Vérifie si nous sommes sur la machine avec le fichier
+  if [ -f "$file_path" ]; then
+    # Nous sommes sur la machine avec le fichier, exécution directe
+    echo "Essai avec endpoint standard..."
+    echo "Exécution de: curl --noproxy localhost -X POST -F \"file=@$file_path\" [...] $load_url"
+    
+    curl --noproxy localhost -X POST \
       -F "file=@$file_path" \
       -F "rowLimit=$row_limit" \
       -F "batchSize=1000" \
-      -s $load_url)
-      
-    echo "$curl_output"
+      "$load_url"
     
-    # Vérifie si le chargement a réussi en analysant la sortie JSON
-    if echo "$curl_output" | grep -q """rowsLoaded"""; then
-      load_success=true
-    fi
+    # Si l'utilisateur a mentionné des problèmes, proposer l'endpoint alternatif
+    echo ""
+    echo "Si le chargement a échoué, essayez avec cet endpoint simplifié:"
+    echo "curl --noproxy localhost --location '$simple_upload_url' \\"
+    echo "  --header 'Content-Type: application/octet-stream' \\"
+    echo "  --data-binary '@$file_path'"
+    
+    load_success=true
   else
-    # Nous sommes sur une autre machine, afficher les instructions
+    # Nous ne sommes pas sur la machine avec le fichier, affichage des instructions
     echo "ATTENTION: Vous n'êtes pas sur la machine avec le fichier."
     echo "Pour que cela fonctionne correctement, exécutez cette commande sur la machine qui a le fichier:"
     echo ""
-    echo "  curl -X POST \\"
+    echo "  curl --noproxy localhost -X POST \\"
     echo "    -F \"file=@$file_path\" \\"
     echo "    -F \"rowLimit=$row_limit\" \\"
     echo "    -F \"batchSize=1000\" \\"
     echo "    http://localhost:$(echo $file_machine | cut -d':' -f2)/api/tables/parquet_file/load-distributed-upload"
     echo ""
+    echo "Ou, alternativement, utilisez cet endpoint simplifié:"
+    echo "  curl --noproxy localhost --location 'http://localhost:$(echo $file_machine | cut -d':' -f2)/api/upload?tableName=parquet_file&limite=$row_limit' \\"
+    echo "    --header 'Content-Type: application/octet-stream' \\"
+    echo "    --data-binary '@$file_path'"
+    echo ""
     echo "Une fois cette commande exécutée sur la machine avec le fichier, vous pourrez"
     echo "exécuter des requêtes distribuées depuis n'importe quelle machine."
-    load_success=false
   fi
-  
-  echo -e "\nRemarque: Les données doivent être chargées uniquement sur la machine avec le fichier."
+
+  echo ""
+  echo "Remarque: Les données doivent être chargées uniquement sur la machine avec le fichier."
   echo "Les requêtes seront exécutées de manière distribuée entre les nœuds."
   echo ""
-  
-  # 4. Vérification et exécution d'une requête de test
+
   echo "4. Vérification des statistiques sur chaque nœud:"
   echo "Statistiques sur nœud 1:"
-  node1_stats=$(curl -s http://$NODE1/api/tables/parquet_file/stats)
-  echo "$node1_stats"
+  curl --noproxy localhost "http://$file_machine/api/tables/parquet_file/stats"
   echo ""
   echo "Statistiques sur nœud 2:"
-  curl -s http://$NODE2/api/tables/parquet_file/stats
-  
-  # 5. Exécute une requête de test si le chargement a réussi
-  if [ "$is_file_machine" = true ] && [ "$load_success" = true ]; then
+  curl --noproxy localhost "http://$node2/api/tables/parquet_file/stats"
+  echo ""
+  if [ -n "$node3" ]; then
+    echo "Statistiques sur nœud 3:"
+    curl --noproxy localhost "http://$node3/api/tables/parquet_file/stats"
     echo ""
-    echo "5. Exécution d'une requête de test distribuée:"
-    echo "Requête GROUP BY PULocationID avec agrégation sur trip_miles..."
-    
-    # Extrait le nombre de lignes pour vérifier si des données ont été chargées
     row_count=$(echo "$node1_stats" | grep -o '"rowCount":[0-9]*' | cut -d':' -f2)
     
     if [ "$row_count" -gt 0 ]; then
@@ -254,25 +266,20 @@ university_setup() {
 # Vérifier les statistiques de la table
 check_stats() {
   echo "Statistiques de la table sur le nœud 1:"
-  curl -s http://$NODE1/api/tables/parquet_file/stats | jq '.'
+  curl --noproxy localhost -s http://$NODE1/api/tables/parquet_file/stats
   
-  echo "Statistiques de la table sur le nœud 2:"
-  curl -s http://$NODE2/api/tables/parquet_file/stats | jq '.'
+  echo "\nStatistiques de la table sur le nœud 2:"
+  curl --noproxy localhost -s http://$NODE2/api/tables/parquet_file/stats
   
-  echo "Statistiques de la table sur le nœud 3:"
-  curl -s http://$NODE3/api/tables/parquet_file/stats | jq '.'
+  echo "\nStatistiques de la table sur le nœud 3:"
+  curl --noproxy localhost -s http://$NODE3/api/tables/parquet_file/stats | jq '.'
 }
 
 # Requête de test sur la table
 query_table() {
-  echo "Exécution d'une requête SQL simple..."
-  curl -X POST -H "Content-Type: application/json" \
-    -d '{
-      "tableName": "parquet_file",
-      "columns": ["*"],
-      "limit": 10,
-      "distributed": true
-    }' \
+  echo "Exécution d'une requête simple..."
+  curl --noproxy localhost -s -X POST -H "Content-Type: application/json" \
+    -d '{"tableName": "parquet_file", "columns": ["*"], "limit": 10, "distributed": true}' \
     http://$NODE1/api/query | jq '.'
 }
 
@@ -284,7 +291,7 @@ query_group_by() {
   
   # Print the full curl command for diagnostics
   echo "Curl command:"
-  echo "curl -X POST -H 'Content-Type: application/json' \
+  echo "curl --noproxy localhost -X POST -H 'Content-Type: application/json' \
     -d '{
       \"tableName\": \"parquet_file\",
       \"columns\": [\"$column\"],
@@ -296,7 +303,7 @@ query_group_by() {
     http://$NODE1/api/query"
     
   # Execute the actual curl command
-  curl -v -X POST -H "Content-Type: application/json" \
+  curl --noproxy localhost -v -X POST -H "Content-Type: application/json" \
     -d "{
       \"tableName\": \"parquet_file\",
       \"columns\": [\"$column\"],
@@ -335,7 +342,7 @@ query_group_by_aggregates() {
   
   # Exécute la requête
   echo "Résultat de la requête:"
-  curl -s -X POST -H "Content-Type: application/json" \
+  curl --noproxy localhost -s -X POST -H "Content-Type: application/json" \
     -d "$query_json" \
     http://$NODE1/api/query | jq '.'
 }
@@ -344,13 +351,13 @@ query_group_by_aggregates() {
 delete_table() {
   local table_name="${1:-parquet_file}"
   echo "Suppression de la table $table_name..."
-  curl -X DELETE http://$NODE1/api/tables/$table_name
+  curl --noproxy localhost -X DELETE http://$NODE1/api/tables/$table_name
 }
 
 # Vérifier l'état de santé du cluster
 check_health() {
   echo "Vérification de l'état de santé du cluster..."
-  curl -s -X GET -H "Accept: application/json" \
+  curl --noproxy localhost -s -X GET -H "Accept: application/json" \
     http://$NODE1/api/cluster/health | jq '.'
 }
 
