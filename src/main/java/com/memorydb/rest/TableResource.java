@@ -25,9 +25,11 @@ import javax.ws.rs.*;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.UUID;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -1105,14 +1107,71 @@ public class TableResource {
      * @return Le fichier temporaire créé
      */
     private File saveToTempFile(InputStream inputStream) throws IOException {
+        String sessionId = UUID.randomUUID().toString();
+        logger.info("[{}] Début de la sauvegarde d'un fichier téléchargé", sessionId);
+        logger.info("[{}] Répertoire temporaire système: {}", sessionId, System.getProperty("java.io.tmpdir"));
+        
+        // Vérifier que l'InputStream n'est pas null
+        if (inputStream == null) {
+            logger.error("[{}] ERREUR: InputStream est null", sessionId);
+            throw new IOException("InputStream est null");
+        }
+        
+        // Création du fichier temporaire
         File tempFile = File.createTempFile("parquet_upload_", ".parquet");
+        logger.info("[{}] Fichier temporaire créé: {}", sessionId, tempFile.getAbsolutePath());
+        
+        // Assurer que le fichier est accessible en lecture pour tous les processus
+        tempFile.setReadable(true, false);
+        tempFile.setWritable(true, false);
+        logger.info("[{}] Permissions configurées - lisible: {}, écritable: {}", 
+                sessionId, tempFile.canRead(), tempFile.canWrite());
+        
+        // Copier le contenu de l'InputStream vers le fichier temporaire
+        long totalBytes = 0;
         try (FileOutputStream out = new FileOutputStream(tempFile)) {
             byte[] buffer = new byte[8192];
             int bytesRead;
             while ((bytesRead = inputStream.read(buffer)) != -1) {
                 out.write(buffer, 0, bytesRead);
+                totalBytes += bytesRead;
+                
+                // Log périodique pour les gros fichiers
+                if (totalBytes % (10 * 1024 * 1024) == 0) {
+                    logger.info("[{}] Progression: {} Mo écrits", sessionId, totalBytes / (1024 * 1024));
+                }
             }
+        } catch (IOException e) {
+            logger.error("[{}] Erreur lors de l'écriture du fichier: {}", sessionId, e.getMessage(), e);
+            throw e;
         }
+        
+        // Vérification finale du fichier
+        if (!tempFile.exists()) {
+            logger.error("[{}] ERREUR: Le fichier n'existe pas après l'écriture", sessionId);
+            throw new IOException("Le fichier temporaire n'a pas été créé correctement");
+        }
+        
+        // Vérification basique de l'en-tête Parquet (signature 'PAR1')
+        try (FileInputStream fis = new FileInputStream(tempFile)) {
+            byte[] header = new byte[4];
+            int headerSize = fis.read(header);
+            if (headerSize == 4) {
+                String headerStr = new String(header);
+                logger.info("[{}] En-tête du fichier: '{}'", sessionId, headerStr);
+                if (!headerStr.equals("PAR1")) {
+                    logger.warn("[{}] ATTENTION: En-tête non conforme à Parquet", sessionId);
+                }
+            } else {
+                logger.warn("[{}] ATTENTION: Impossible de lire 4 octets d'en-tête", sessionId);
+            }
+        } catch (Exception e) {
+            logger.warn("[{}] ATTENTION: Erreur lors de la vérification de l'en-tête: {}", sessionId, e.getMessage());
+            // On continue malgré cette erreur
+        }
+        
+        logger.info("[{}] Fichier temporaire créé avec succès: {} (taille: {} octets)", 
+                sessionId, tempFile.getAbsolutePath(), tempFile.length());
         return tempFile;
     }
 

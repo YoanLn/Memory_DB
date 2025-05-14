@@ -7,9 +7,6 @@
 @contentType = application/json
 @parquetFile = /Users/yoanln/MemoryDB/data/test2.parquet
 
-### Check server health
-GET {{baseUrl}}/api/cluster/health
-Accept: {{contentType}}
 
 <> 2025-04-09T162755.200.json
 <> 2025-04-09T161718.200.json

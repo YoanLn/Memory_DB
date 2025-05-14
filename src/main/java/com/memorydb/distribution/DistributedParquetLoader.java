@@ -55,7 +55,27 @@ public class DistributedParquetLoader {
         }
         
         // Vérification et propagation du fichier à tous les nœuds avant de commencer le traitement
-        ensureFileAvailableOnAllNodes(filePath, nodes);
+        logger.info("Début de la vérification de disponibilité du fichier sur tous les nœuds: {}", filePath);
+        
+        // Vérifier d'abord que le fichier local existe et est lisible
+        File localFile = new File(filePath);
+        if (localFile.exists()) {
+            logger.info("Fichier local trouvé - Chemin: {}, Taille: {} octets, Lisible: {}", 
+                    filePath, localFile.length(), localFile.canRead());
+        } else {
+            logger.error("ERREUR CRITIQUE: Le fichier local n'existe pas: {}", filePath);
+            logger.error("Répertoire courant: {}", new File(".").getAbsolutePath());
+            logger.error("Propriétaire du processus: {}", System.getProperty("user.name"));
+        }
+        
+        // Tenter d'assurer que le fichier est disponible sur tous les nœuds
+        boolean fileAvailable = ensureFileAvailableOnAllNodes(filePath, nodes);
+        
+        if (!fileAvailable) {
+            logger.warn("ATTENTION: Le fichier n'est pas disponible sur tous les nœuds. Le traitement distribué pourrait échouer.");
+        } else {
+            logger.info("Le fichier est disponible sur tous les nœuds du cluster.");
+        }
         
         // Si un seul nœud, pas besoin de distribution
         if (nodes.size() <= 1) {
