@@ -1,5 +1,7 @@
 package com.memorydb.distribution;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.memorydb.core.Column;
 import com.memorydb.query.Condition;
 import com.memorydb.query.Query;
@@ -7,6 +9,7 @@ import com.memorydb.rest.dto.ColumnDto;
 import com.memorydb.rest.dto.ConditionDto;
 import com.memorydb.rest.dto.QueryDto;
 import com.memorydb.rest.dto.TableDto;
+import org.jboss.resteasy.plugins.providers.multipart.MultipartFormDataOutput;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -16,9 +19,12 @@ import javax.ws.rs.client.Entity;
 import javax.ws.rs.core.GenericType;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
+import java.io.File;
+import java.io.FileInputStream;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 /**
@@ -28,6 +34,115 @@ public class NodeClient {
 
     private static final Logger logger = LoggerFactory.getLogger(NodeClient.class);
     private static final Client client = ClientBuilder.newClient();
+    private static final int FILE_TRANSFER_TIMEOUT_MS = 60000; // 60 secondes pour les transferts de fichiers
+    
+    /**
+     * Vérifie si un fichier existe sur un nœud distant
+     * @param node Le nœud distant
+     * @param filePath Chemin du fichier à vérifier
+     * @return true si le fichier existe, false sinon
+     */
+    public static boolean checkFileExists(NodeInfo node, String filePath) {
+        try {
+            String url = String.format("http://%s:%d/api/files/check", node.getAddress(), node.getPort());
+            
+            // Envoie la demande avec le chemin du fichier comme paramètre
+            Response response = client.target(url)
+                    .queryParam("path", filePath)
+                    .request(MediaType.APPLICATION_JSON)
+                    .get();
+            
+            if (response.getStatus() == Response.Status.OK.getStatusCode()) {
+                Map<String, Object> result = response.readEntity(new GenericType<Map<String, Object>>() {});
+                boolean exists = Boolean.TRUE.equals(result.get("exists"));
+                logger.info("Vérification du fichier sur le nœud {}: {} - {}", 
+                        node.getId(), filePath, exists ? "existe" : "n'existe pas");
+                return exists;
+            }
+            
+            logger.error("Échec de la vérification du fichier sur le nœud {}: {} - {}", 
+                    node.getId(), response.getStatus(), response.readEntity(String.class));
+            return false;
+        } catch (Exception e) {
+            logger.error("Erreur lors de la vérification du fichier sur le nœud {}: {}", 
+                    node.getId(), e.getMessage());
+            return false;
+        }
+    }
+    
+    /**
+     * Envoie un fichier à un nœud distant
+     * @param node Le nœud distant
+     * @param filePath Chemin du fichier local à envoyer
+     * @return Le chemin du fichier sur le nœud distant en cas de succès, null sinon
+     */
+    public static String sendFile(NodeInfo node, String filePath) {
+        try {
+            if (filePath == null || filePath.isEmpty()) {
+                logger.error("Impossible d'envoyer un fichier avec un chemin vide");
+                return null;
+            }
+            
+            // Vérifie si le fichier existe déjà sur le nœud distant
+            if (checkFileExists(node, filePath)) {
+                logger.info("Le fichier existe déjà sur le nœud {}: {}", node.getId(), filePath);
+                return filePath;
+            }
+            
+            String url = String.format("http://%s:%d/api/files/upload", node.getAddress(), node.getPort());
+            File file = new File(filePath);
+            
+            if (!file.exists()) {
+                logger.error("Le fichier à envoyer n'existe pas: {}", filePath);
+                return null;
+            }
+            
+            // Préparation du formulaire multipart
+            MultipartFormDataOutput formData = new MultipartFormDataOutput();
+            formData.addFormData("file", new FileInputStream(file), MediaType.APPLICATION_OCTET_STREAM_TYPE);
+            formData.addFormData("filename", file.getName(), MediaType.TEXT_PLAIN_TYPE);
+            formData.addFormData("originalPath", filePath, MediaType.TEXT_PLAIN_TYPE);
+            
+            logger.info("Envoi du fichier {} au nœud {} ({} octets)", 
+                    filePath, node.getId(), file.length());
+            
+            // Configuration du client avec timeout pour les gros fichiers
+            Client clientWithTimeout = ClientBuilder.newBuilder()
+                    .connectTimeout(FILE_TRANSFER_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                    .readTimeout(FILE_TRANSFER_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                    .build();
+            
+            try {
+                // Envoie la demande
+                Response response = clientWithTimeout.target(url)
+                        .request()
+                        .post(Entity.entity(formData, MediaType.MULTIPART_FORM_DATA_TYPE));
+                
+                if (response.getStatus() == Response.Status.OK.getStatusCode()) {
+                    Map<String, String> result = response.readEntity(new GenericType<Map<String, String>>() {});
+                    String remotePath = result.get("path");
+                    logger.info("Fichier envoyé avec succès au nœud {}, chemin distant: {}", 
+                            node.getId(), remotePath);
+                    return remotePath;
+                }
+                
+                logger.error("Échec de l'envoi du fichier au nœud {}: {} - {}", 
+                        node.getId(), response.getStatus(), response.readEntity(String.class));
+            } finally {
+                try {
+                    clientWithTimeout.close();
+                } catch (Exception e) {
+                    logger.warn("Erreur lors de la fermeture du client HTTP: {}", e.getMessage());
+                }
+            }
+            
+            return null;
+        } catch (Exception e) {
+            logger.error("Erreur lors de l'envoi du fichier au nœud {}: {}", 
+                    node.getId(), e.getMessage());
+            return null;
+        }
+    }
     
     /**
      * Envoie une demande de création de table à un nœud distant
@@ -343,7 +458,7 @@ public static List<Map<String, Object>> executeQuery(NodeInfo node, Query query,
                     .collect(Collectors.toList());
         }
         
-        // Crée un nouveau DTO de requête
+        // Crée un nouveau DTO de requête avec tous les champs nécessaires
         QueryDto queryDto = new QueryDto(
                 query.getTableName(),
                 query.getColumns(),
@@ -354,8 +469,21 @@ public static List<Map<String, Object>> executeQuery(NodeInfo node, Query query,
         );
         
         // Copie les flags importants du DTO original
-        queryDto.setDistributed(originalQueryDto.isDistributed());
+        queryDto.setDistributed(false); // Important: Définir à false pour éviter des requêtes en cascade
         queryDto.setForwardedQuery(true); // Marque comme requête transmise pour éviter les boucles infinies
+        
+        // Important: Transfer group by and aggregation information
+        if (originalQueryDto != null) {
+            // Copy GROUP BY columns
+            if (originalQueryDto.getGroupBy() != null && !originalQueryDto.getGroupBy().isEmpty()) {
+                queryDto.setGroupBy(originalQueryDto.getGroupBy());
+            }
+            
+            // Copy aggregation functions
+            if (originalQueryDto.getAggregates() != null && !originalQueryDto.getAggregates().isEmpty()) {
+                queryDto.setAggregates(originalQueryDto.getAggregates());
+            }
+        }
         
         logger.info("Envoi d'une requête transmise vers le nœud {}", node.getId());
         
@@ -365,12 +493,75 @@ public static List<Map<String, Object>> executeQuery(NodeInfo node, Query query,
                 .post(Entity.entity(queryDto, MediaType.APPLICATION_JSON));
         
         if (response.getStatus() == Response.Status.OK.getStatusCode()) {
-            List<Map<String, Object>> results = response.readEntity(new GenericType<List<Map<String, Object>>>() {});
-            logger.info("{} résultats reçus du nœud {}", results.size(), node.getId());
-            return results;
+            try {
+                // Lire la réponse comme une chaîne d'abord pour éviter l'erreur "Response is closed"
+                String responseBody = response.readEntity(String.class);
+                logger.info("Réponse reçue du nœud {}", node.getId());
+                
+                if (responseBody == null || responseBody.isEmpty() || responseBody.trim().equals("[]")) {
+                    logger.info("Réponse vide reçue du nœud {}", node.getId());
+                    return new ArrayList<>();
+                }
+                
+                try {
+                    // Convertir la chaîne en liste de maps
+                    ObjectMapper mapper = new ObjectMapper();
+                    List<Map<String, Object>> results = mapper.readValue(responseBody, 
+                            new TypeReference<List<Map<String, Object>>>() {});
+                    logger.info("{} résultats reçus du nœud {}", results.size(), node.getId());
+                    return results;
+                } catch (Exception e) {
+                    logger.info("Impossible de convertir en liste directement, essai d'autres formats: {}", e.getMessage());
+                    
+                    try {
+                        // Essaie de désérialiser en QueryResultDto ou autre format
+                        ObjectMapper mapper = new ObjectMapper();
+                        Map<String, Object> resultMap = mapper.readValue(responseBody, 
+                                new TypeReference<Map<String, Object>>() {});
+                        
+                        // Vérifie si le résultat contient le champ "rows" (format QueryResultDto)
+                        if (resultMap.containsKey("rows") && resultMap.get("rows") instanceof List) {
+                            @SuppressWarnings("unchecked")
+                            List<Map<String, Object>> rows = (List<Map<String, Object>>) resultMap.get("rows");
+                            logger.info("Données extraites du champ 'rows': {} résultats", rows.size());
+                            return rows;
+                        }
+                        
+                        // Vérifie si le résultat contient un tableau de données sous "data"
+                        if (resultMap.containsKey("data") && resultMap.get("data") instanceof List) {
+                            @SuppressWarnings("unchecked")
+                            List<Map<String, Object>> dataList = (List<Map<String, Object>>) resultMap.get("data");
+                            logger.info("Données extraites du champ 'data': {} résultats", dataList.size());
+                            return dataList;
+                        }
+                        
+                        logger.warn("Format de réponse non reconnu, retour d'une liste vide");
+                        return new ArrayList<>();
+                    } catch (Exception ex) {
+                        logger.error("Impossible de traiter la réponse JSON: {}", ex.getMessage());
+                        return new ArrayList<>();
+                    }
+                }
+            } catch (Exception e) {
+                logger.error("Erreur lors de la lecture de la réponse: {}", e.getMessage());
+                return new ArrayList<>();
+            }
         } else {
-            logger.error("Échec de l'exécution de la requête sur le nœud {}: {} - {}", 
-                    node.getId(), response.getStatus(), response.readEntity(String.class));
+            try {
+                // Lire le corps en tant que chaîne pour le logging, mais de manière sécurisée
+                String errorBody = "[Impossible de lire le corps de l'erreur]";
+                try {
+                    errorBody = response.readEntity(String.class);
+                } catch (Exception ex) {
+                    // Ignore les erreurs lors de la lecture du corps d'erreur
+                }
+                
+                logger.error("Échec de l'exécution de la requête sur le nœud {}: {} - {}", 
+                        node.getId(), response.getStatus(), errorBody);
+            } catch (Exception e) {
+                logger.error("Échec de l'exécution de la requête sur le nœud {}: {}", 
+                        node.getId(), response.getStatus());
+            }
             return new ArrayList<>();
         }
     } catch (Exception e) {

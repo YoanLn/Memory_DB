@@ -33,11 +33,13 @@
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/MemoryDbApplication.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/rest/ParquetResource.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/index/BitmapIndex.java
+/Users/yoanln/MemoryDB/src/main/java/com/memorydb/rest/FileResource.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/rest/dto/QueryDto.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/core/DatabaseContext.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/distribution/ClusterManager.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/query/OrderByColumn.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/rest/dto/OrderByDto.java
+/Users/yoanln/MemoryDB/src/main/java/com/memorydb/rest/dto/OrderByDeserializer.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/parquet/ParquetLoadStats.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/parquet/ParquetLoadOptions.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/query/AggregateFunction.java

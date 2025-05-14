@@ -4,8 +4,11 @@ import com.memorydb.core.Column;
 import com.memorydb.core.DatabaseContext;
 import com.memorydb.core.Table;
 import com.memorydb.distribution.ClusterManager;
+import com.memorydb.query.AggregateFunction;
 import com.memorydb.query.Condition;
 import com.memorydb.query.Query;
+import com.memorydb.query.QueryExecutor;
+import com.memorydb.query.QueryResult;
 
 import com.memorydb.rest.dto.OrderByDto;
 import com.memorydb.rest.dto.QueryDto;
@@ -44,6 +47,9 @@ public class QueryResource {
     @Inject
     private ClusterManager clusterManager;
     
+    @Inject
+    private QueryExecutor queryExecutor;
+    
     
     /**
      * Exécute une requête distribuée ou locale avec une implémentation simplifiée
@@ -68,16 +74,26 @@ public class QueryResource {
                         .build();
             }
             
+            // Convertit le DTO en objet Query
+            Query query = convertDtoToQuery(queryDto);
+            
             // Gestion des requêtes distribuées
             if (queryDto.isDistributed() && !queryDto.isForwardedQuery()) {
                 logger.info("Exécution d'une requête distribuée sur la table '{}' depuis le nœud principal", tableName);
-                // Convertit le DTO en objet Query pour l'exécution distribuée
-                Query query = convertDtoToQuery(queryDto);
                 List<Map<String, Object>> results = clusterManager.executeDistributedQuery(query, queryDto);
                 return Response.ok(results).build();
             } else if (queryDto.isForwardedQuery()) {
                 // Cette requête a été transmise d'un autre nœud, l'exécuter localement uniquement
                 logger.info("Exécution locale d'une requête transmise pour la table '{}'", tableName);
+            }
+            
+            // Si cette requête contient des GROUP BY ou des agrégations, utiliser QueryExecutor
+            if ((queryDto.getGroupBy() != null && !queryDto.getGroupBy().isEmpty()) || 
+                (queryDto.getAggregates() != null && !queryDto.getAggregates().isEmpty())) {
+                logger.info("Utilisation de QueryExecutor pour la requête avec GROUP BY ou agrégation");
+                QueryResult result = queryExecutor.executeQuery(query);
+                List<Map<String, Object>> resultList = result.getRows();
+                return Response.ok(resultList).build();
             }
             
             // Implémentation simplifiée pour l'exécution locale (contourne le QueryExecutor)
@@ -190,7 +206,12 @@ public class QueryResource {
                 
                 // Applique la limite
                 int limit = queryDto.getLimit();
-                if (limit > 0 && filteredRows.size() > limit) {
+                if (limit <= 0) {
+                    // Si la limite est négative ou zéro, on utilise une valeur par défaut élevée
+                    limit = Integer.MAX_VALUE;
+                }
+                
+                if (filteredRows.size() > limit) {
                     filteredRows = filteredRows.subList(0, limit);
                 }
                 
@@ -200,7 +221,8 @@ public class QueryResource {
                 // Définit l'ordre des colonnes dans le résultat (important pour préserver l'ordre demandé)
                 resultDto.setColumns(selectedColumns);
                 
-                int resultCount = Math.min(filteredRows.size(), limit);
+                // S'assure que la limite n'est jamais négative pour éviter NegativeArraySizeException
+                int resultCount = filteredRows.size();
                 
                 // Optimisation: utiliser directement un tableau 2D au lieu d'une liste de Maps
                 Object[][] resultData = new Object[resultCount][selectedColumns.size()];
@@ -732,6 +754,22 @@ public class QueryResource {
             }
         }
         
+        // Ajoute les colonnes GROUP BY
+        List<String> groupBy = queryDto.getGroupBy();
+        if (groupBy != null && !groupBy.isEmpty()) {
+            for (String column : groupBy) {
+                query.groupBy(column);
+            }
+        }
+        
+        // Ajoute les fonctions d'agrégation
+        Map<String, AggregateFunction> aggregates = queryDto.toAggregateFunctions();
+        if (aggregates != null && !aggregates.isEmpty()) {
+            for (Map.Entry<String, AggregateFunction> entry : aggregates.entrySet()) {
+                query.aggregate(entry.getKey(), entry.getValue());
+            }
+        }
+        
         // Ajoute le tri (support des colonnes multiples)
         List<OrderByDto> orderByList = queryDto.getOrderBy();
         if (orderByList != null && !orderByList.isEmpty()) {
@@ -768,4 +806,4 @@ public class QueryResource {
         
         return query;
     }
-} 
+}

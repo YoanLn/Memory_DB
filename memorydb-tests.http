@@ -151,7 +151,7 @@ Content-Type: {{contentType}}
     }
   ],
   "limit": 50,
-    "distributed": true
+   "distributed": true
 
 }
 
@@ -191,7 +191,8 @@ Content-Type: {{contentType}}
   "groupByColumns": ["PULocationID"],
   "orderBy": "trip_count",
   "orderByAscending": false,
-  "limit": 20
+  "limit": 20,
+  "distributed": true
 }
 
 <> 2025-04-09T164804.500.json

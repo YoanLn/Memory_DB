@@ -9,10 +9,13 @@ import org.slf4j.LoggerFactory;
 import javax.inject.Inject;
 import javax.inject.Singleton;
 
+import java.io.File;
 import java.io.IOException;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Gestionnaire pour le chargement distribué des fichiers Parquet
@@ -22,6 +25,9 @@ import java.util.Map;
 public class DistributedParquetLoader {
 
     private static final Logger logger = LoggerFactory.getLogger(DistributedParquetLoader.class);
+    
+    // Cache des fichiers distribués pour éviter les redistributions inutiles
+    private static final Map<String, Map<String, Boolean>> distributedFilesCache = new ConcurrentHashMap<>();
     
     @Inject
     private ClusterManager clusterManager;
@@ -47,6 +53,9 @@ public class DistributedParquetLoader {
         for (NodeInfo node : nodes) {
             resultMap.put(node.getId(), 0L);
         }
+        
+        // Vérification et propagation du fichier à tous les nœuds avant de commencer le traitement
+        ensureFileAvailableOnAllNodes(filePath, nodes);
         
         // Si un seul nœud, pas besoin de distribution
         if (nodes.size() <= 1) {
@@ -192,5 +201,108 @@ public class DistributedParquetLoader {
     private boolean sendLoadRangeRequest(NodeInfo node, String tableName, String filePath, 
                                          int startRow, int rowCount, int batchSize) {
         return NodeClient.sendLoadRangeRequest(node, tableName, filePath, startRow, rowCount, batchSize);
+    }
+    
+    /**
+     * Vérifie que tous les nœuds ont accès au fichier et le propage si nécessaire
+     * Cette méthode assure que le fichier est disponible sur tous les nœuds avant le traitement distribué
+     * 
+     * @param filePath Chemin du fichier Parquet à distribuer
+     * @param nodes Liste des nœuds du cluster
+     * @return true si tous les nœuds ont accès au fichier, false sinon
+     */
+    private boolean ensureFileAvailableOnAllNodes(String filePath, Collection<NodeInfo> nodes) {
+        if (filePath == null || filePath.isEmpty() || nodes.isEmpty()) {
+            return false;
+        }
+        
+        // ID du nœud local
+        String localNodeId = clusterManager.getLocalNode().getId();
+        File localFile = new File(filePath);
+        
+        if (!localFile.exists()) {
+            logger.error("Le fichier local n'existe pas: {}", filePath);
+            return false;
+        }
+        
+        // Normalise le chemin du fichier (nom du fichier sans répertoire)
+        String filename = localFile.getName();
+        logger.info("Vérification de la disponibilité du fichier {} sur tous les nœuds", filename);
+        
+        // Récupère ou initialise le cache pour ce fichier
+        Map<String, Boolean> nodeAvailabilityMap = distributedFilesCache.computeIfAbsent(
+                filename, k -> new ConcurrentHashMap<>());
+        
+        // Compte le nombre de nœuds qui ont besoin du fichier
+        AtomicBoolean allNodesHaveFile = new AtomicBoolean(true);
+        int nodesToSyncCount = 0;
+        
+        for (NodeInfo node : nodes) {
+            // Ignore le nœud local qui a déjà le fichier
+            if (node.getId().equals(localNodeId)) {
+                nodeAvailabilityMap.put(localNodeId, true);
+                continue;
+            }
+            
+            // Vérifie si le nœud a déjà le fichier selon notre cache
+            Boolean nodeHasFile = nodeAvailabilityMap.get(node.getId());
+            
+            // Si non présent dans le cache, vérification via API
+            if (nodeHasFile == null) {
+                nodeHasFile = NodeClient.checkFileExists(node, filePath);
+                nodeAvailabilityMap.put(node.getId(), nodeHasFile);
+            }
+            
+            if (!nodeHasFile) {
+                allNodesHaveFile.set(false);
+                nodesToSyncCount++;
+            }
+        }
+        
+        // Si tous les nœuds ont déjà le fichier, rien à faire
+        if (allNodesHaveFile.get()) {
+            logger.info("Tous les nœuds ont déjà accès au fichier {}", filename);
+            return true;
+        }
+        
+        logger.info("{} nœuds nécessitent une synchronisation du fichier {}", nodesToSyncCount, filename);
+        
+        // Propagation du fichier aux nœuds qui ne l'ont pas
+        boolean success = true;
+        for (NodeInfo node : nodes) {
+            // Ignore le nœud local
+            if (node.getId().equals(localNodeId)) {
+                continue;
+            }
+            
+            Boolean nodeHasFile = nodeAvailabilityMap.get(node.getId());
+            
+            if (nodeHasFile == null || !nodeHasFile) {
+                logger.info("Envoi du fichier {} au nœud {}", filename, node.getId());
+                
+                // Envoie le fichier au nœud
+                String remotePath = NodeClient.sendFile(node, filePath);
+                
+                if (remotePath != null) {
+                    nodeAvailabilityMap.put(node.getId(), true);
+                    logger.info("Fichier {} envoyé avec succès au nœud {}, chemin distant: {}", 
+                            filename, node.getId(), remotePath);
+                } else {
+                    success = false;
+                    logger.error("Échec de l'envoi du fichier {} au nœud {}", filename, node.getId());
+                }
+            }
+        }
+        
+        // Mise à jour du cache global
+        distributedFilesCache.put(filename, nodeAvailabilityMap);
+        
+        if (success) {
+            logger.info("Synchronisation du fichier {} terminée avec succès sur tous les nœuds", filename);
+        } else {
+            logger.warn("Synchronisation du fichier {} incomplète, certains nœuds n'ont pas le fichier", filename);
+        }
+        
+        return success;
     }
 }

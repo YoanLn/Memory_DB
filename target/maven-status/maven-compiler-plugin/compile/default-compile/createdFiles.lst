@@ -1,5 +1,7 @@
 com/memorydb/rest/dto/TableDto.class
 com/memorydb/system/BootstrapService.class
+com/memorydb/rest/FileResource$FileUploadForm.class
+com/memorydb/distribution/NodeClient$6.class
 com/memorydb/parquet/VectorizedParquetLoader.class
 com/memorydb/rest/TableResource.class
 com/memorydb/query/Condition.class
@@ -13,8 +15,10 @@ com/memorydb/core/Table.class
 com/memorydb/rest/DistributedParquetUploadForm.class
 com/memorydb/distribution/NodeInfo.class
 com/memorydb/rest/dto/ColumnDto.class
+com/memorydb/rest/FileResource.class
 com/memorydb/rest/dto/ConditionDto.class
 com/memorydb/rest/TableResource$ParquetLoadRequest.class
+com/memorydb/distribution/NodeClient$7.class
 com/memorydb/distribution/ClusterManager.class
 com/memorydb/parquet/ParquetLoadStats.class
 com/memorydb/distribution/NodeClient$3.class
@@ -26,6 +30,7 @@ com/memorydb/storage/TableData$1.class
 com/memorydb/query/Query.class
 com/memorydb/distribution/DistributedParquetLoader.class
 com/memorydb/parquet/ParquetLoader.class
+com/memorydb/rest/dto/OrderByDeserializer.class
 com/memorydb/rest/ParquetResource.class
 com/memorydb/core/DatabaseContext.class
 com/memorydb/rest/dto/QueryResultDto.class
@@ -48,6 +53,7 @@ com/memorydb/distribution/NodeClient$1.class
 com/memorydb/core/Column.class
 com/memorydb/distribution/NodeDiscovery.class
 com/memorydb/query/QueryExecutor$GroupKey.class
+com/memorydb/distribution/ClusterManager$1.class
 com/memorydb/rest/ExportResource.class
 com/memorydb/distribution/NodeStatus.class
 com/memorydb/query/ConditionType.class
@@ -58,3 +64,4 @@ com/memorydb/query/Condition$Operator.class
 com/memorydb/storage/ColumnStore$1.class
 com/memorydb/query/Condition$1.class
 com/memorydb/MemoryDbApplication.class
+com/memorydb/distribution/NodeClient$5.class

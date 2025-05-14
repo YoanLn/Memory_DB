@@ -1,10 +1,15 @@
 package com.memorydb.rest.dto;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
+import com.memorydb.query.AggregateFunction;
 import com.memorydb.query.Condition;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * DTO pour les requêtes
@@ -13,12 +18,16 @@ public class QueryDto {
     private String tableName;
     private List<String> columns;
     private List<ConditionDto> conditions;
+    @JsonDeserialize(using = OrderByDeserializer.class)
     private List<OrderByDto> orderBy;
-// Keeping these for backward compatibility
-private String orderByColumn;
-private boolean orderByAscending;
+    // Keeping these for backward compatibility
+    private String orderByColumn;
+    private boolean orderByAscending;
     private int limit;
     private boolean distributed;
+    // Added fields for GROUP BY and aggregation support
+    private List<String> groupBy;
+    private Map<String, String> aggregates; // format: {"column": "FUNCTION"}
     /**
      * Flag indiquant si la requête a déjà été transmise à un autre nœud.
      * Utilisé pour éviter les boucles infinies dans les requêtes distribuées.
@@ -29,6 +38,8 @@ private boolean orderByAscending;
      * Constructeur par défaut
      */
     public QueryDto() {
+        this.groupBy = new ArrayList<>();
+        this.aggregates = new HashMap<>();
     }
     
     /**
@@ -49,6 +60,8 @@ private boolean orderByAscending;
         this.orderByAscending = orderByAscending;
         this.limit = limit;
         this.distributed = false;
+        this.groupBy = new ArrayList<>();
+        this.aggregates = new HashMap<>();
         
         // Initialize orderBy list with the single column for backward compatibility
         if (orderByColumn != null && !orderByColumn.isEmpty()) {
@@ -78,6 +91,8 @@ private boolean orderByAscending;
         this.orderByAscending = orderByAscending;
         this.limit = limit;
         this.distributed = distributed;
+        this.groupBy = new ArrayList<>();
+        this.aggregates = new HashMap<>();
         
         // Initialize orderBy list with the single column for backward compatibility
         if (orderByColumn != null && !orderByColumn.isEmpty()) {
@@ -264,5 +279,58 @@ private boolean orderByAscending;
     
     public void setForwardedQuery(boolean forwardedQuery) {
         this.forwardedQuery = forwardedQuery;
+    }
+    
+    /**
+     * Get the GROUP BY columns
+     * @return list of columns to group by
+     */
+    public List<String> getGroupBy() {
+        return groupBy;
+    }
+    
+    /**
+     * Set the GROUP BY columns
+     * @param groupBy list of columns to group by
+     */
+    public void setGroupBy(List<String> groupBy) {
+        this.groupBy = groupBy;
+    }
+    
+    /**
+     * Get the aggregate functions mapping
+     * @return map of column name to function name
+     */
+    public Map<String, String> getAggregates() {
+        return aggregates;
+    }
+    
+    /**
+     * Set the aggregate functions mapping
+     * @param aggregates map of column name to function name
+     */
+    public void setAggregates(Map<String, String> aggregates) {
+        this.aggregates = aggregates;
+    }
+    
+    /**
+     * Helper method to convert the string-based aggregates map to the actual AggregateFunction enum types
+     * @return map of column name to AggregateFunction enum
+     */
+    @JsonIgnore
+    public Map<String, AggregateFunction> toAggregateFunctions() {
+        if (aggregates == null || aggregates.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        
+        Map<String, AggregateFunction> result = new HashMap<>();
+        for (Map.Entry<String, String> entry : aggregates.entrySet()) {
+            try {
+                result.put(entry.getKey(), AggregateFunction.fromString(entry.getValue()));
+            } catch (IllegalArgumentException e) {
+                // Skip invalid function names
+            }
+        }
+        return result;
     }
 } 
