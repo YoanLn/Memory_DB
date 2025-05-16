@@ -1108,10 +1108,82 @@ public class TableResource {
      * @throws IOException Si une erreur d'E/S se produit
      */
     private File saveToTempFile(InputStream inputStream) throws IOException {
-        // Utilise la nouvelle classe DirectBufferIO pour des performances optimales
-        // Cette implémentation utilise un ByteBuffer direct (hors heap Java)
-        // qui réduit considérablement la pression sur le GC
-        return DirectBufferIO.saveToTempFile(inputStream, "parquet_upload_", ".parquet");
+        // Déterminer si nous sommes dans un environnement universitaire
+        boolean isUniversityEnv = isUniversityEnvironment();
+        
+        if (isUniversityEnv) {
+            logger.info("Environnement universitaire détecté, utilisation du mode optimisé pour machines avec ressources limitées");
+            
+            // Configure un répertoire personnalisé pour les uploads si nécessaire
+            String userDir = System.getProperty("user.home");
+            String uploadDir = userDir + "/memorydb_uploads";
+            try {
+                // Tente de configurer un répertoire dans le home de l'utilisateur
+                File dir = new File(uploadDir);
+                if (!dir.exists()) {
+                    dir.mkdirs();
+                }
+                
+                if (dir.canWrite()) {
+                    com.memorydb.util.UniversityBufferIO.setUploadDirectory(uploadDir);
+                    logger.info("Répertoire d'upload défini sur: {}", uploadDir);
+                }
+            } catch (Exception e) {
+                logger.warn("Impossible de configurer le répertoire d'upload personnalisé: {}", e.getMessage());
+            }
+            
+            // Utilise le mode optimisé pour université avec des buffers plus petits et des flush plus fréquents
+            return com.memorydb.util.UniversityBufferIO.saveToTempFile(inputStream, "univ_upload_", ".parquet");
+        } else {
+            // Mode standard pour environnements sans contraintes
+            logger.info("Utilisation du mode standard pour le téléchargement de fichier");
+            return DirectBufferIO.saveToTempFile(inputStream, "parquet_upload_", ".parquet");
+        }
+    }
+    
+    /**
+     * Détecte si l'application s'exécute dans un environnement universitaire
+     * en cherchant des indices dans le système
+     * @return true si nous sommes probablement dans un environnement universitaire
+     */
+    private boolean isUniversityEnvironment() {
+        // Recherche les indices d'un environnement universitaire
+        try {
+            // Vérifie si la variable UNIVERSITY_ENV est définie
+            String envFlag = System.getProperty("UNIVERSITY_ENV");
+            if (envFlag != null && (envFlag.equals("1") || envFlag.equalsIgnoreCase("true"))) {
+                return true;
+            }
+            
+            // Recherche de chemins typiques dans les universités
+            String userDir = System.getProperty("user.dir");
+            String userName = System.getProperty("user.name");
+            
+            // Chemins typiques des universités
+            if (userDir != null) {
+                if (userDir.contains("/users/nfs/Etu") || 
+                    userDir.contains("/home/students/") ||
+                    userDir.contains("/etu/") ||
+                    userDir.contains("/ppti-")) {
+                    logger.info("Environnement universitaire détecté basé sur le répertoire: {}", userDir);
+                    return true;
+                }
+            }
+            
+            // Détection basée sur les limitations de mémoire
+            Runtime rt = Runtime.getRuntime();
+            long maxMem = rt.maxMemory();
+            if (maxMem < 1024 * 1024 * 512) { // Moins de 512 MB
+                logger.info("Environnement avec mémoire limitée détecté ({} MB), activation du mode université", maxMem / (1024 * 1024));
+                return true;
+            }
+            
+            // Par défaut, suppose que nous ne sommes pas dans un environnement universitaire
+            return false;
+        } catch (Exception e) {
+            logger.warn("Erreur lors de la détection d'environnement: {}", e.getMessage());
+            return false;
+        }
     }
     
     /**
