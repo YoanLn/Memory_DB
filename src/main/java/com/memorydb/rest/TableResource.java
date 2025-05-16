@@ -19,19 +19,20 @@ import com.memorydb.storage.TableData;
 import org.jboss.resteasy.annotations.providers.multipart.MultipartForm;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
 import javax.enterprise.context.ApplicationScoped;
 import javax.inject.Inject;
 import javax.ws.rs.*;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
-import java.io.File;
-import java.io.IOException;
-import java.io.InputStream;
+import javax.ws.rs.core.StreamingOutput;
+
+import java.io.*;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+
+import com.memorydb.common.DataType;
 
 /**
  * Resource REST pour la gestion des tables
@@ -1353,5 +1354,96 @@ public class TableResource {
         public String file; // Alias pour filePath (pour compatibilité)
         public long rowLimit = -1;
         public int batchSize = 100000;
+    }
+    
+    /**
+     * Reçoit un batch de données d'un autre nœud et l'ajoute à la table locale
+     * 
+     * @param tableName Le nom de la table à mettre à jour
+     * @param batchData Les données du batch au format JSON
+     * @return Réponse HTTP indiquant le statut de l'opération
+     */
+    @POST
+    @Path("/{tableName}/add-batch")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response addBatchFromRemoteNode(
+            @PathParam("tableName") String tableName,
+            Map<String, Object> batchData) {
+        
+        try {
+            // Vérifie que la table existe
+            if (!databaseContext.tableExists(tableName)) {
+                return Response.status(Response.Status.NOT_FOUND)
+                        .entity(Map.of("error", "Table inconnue: " + tableName))
+                        .build();
+            }
+            
+            // Extrait les données du batch
+            @SuppressWarnings("unchecked")
+            List<List<Object>> rows = (List<List<Object>>) batchData.get("rows");
+            if (rows == null || rows.isEmpty()) {
+                return Response.status(Response.Status.BAD_REQUEST)
+                        .entity(Map.of("error", "Batch de données vide ou invalide"))
+                        .build();
+            }
+            
+            TableData tableData = databaseContext.getTableData(tableName);
+            int rowsAdded = 0;
+            
+            // Ajoute les lignes à la table locale
+            tableData.writeLock();
+            try {
+                // Conversion des ArrayList en tableaux Object[] avec conversion des types
+                Table table = databaseContext.getTable(tableName);
+                List<Column> columns = table.getColumns();
+                
+                for (List<Object> rowList : rows) {
+                    // Prépare un tableau d'objets avec le bon nombre de colonnes
+                    Object[] rowArray = new Object[columns.size()];
+                    
+                    // Récupère les valeurs et effectue les conversions nécessaires
+                    for (int i = 0; i < Math.min(rowList.size(), columns.size()); i++) {
+                        Object value = rowList.get(i);
+                        Column column = columns.get(i);
+                        
+                        // Conversions spécifiques par type
+                        if (value != null) {
+                            // Conversion Integer -> Long si nécessaire
+                            if (value instanceof Integer && "LONG".equals(column.getType().name())) {
+                                value = ((Integer) value).longValue();
+                            }
+                            // Conversions Double -> Float si nécessaire
+                            else if (value instanceof Double && "FLOAT".equals(column.getType().name())) {
+                                value = ((Double) value).floatValue();
+                            }
+                            // Ajoutez d'autres conversions si nécessaire
+                        }
+                        
+                        rowArray[i] = value;
+                    }
+                    
+                    tableData.addRow(rowArray);
+                    rowsAdded++;
+                }
+            } finally {
+                tableData.writeUnlock();
+            }
+            
+            // Log et retourne le résultat
+            logger.info("[Remote Batch] Ajout de {} lignes à la table {}", rowsAdded, tableName);
+            
+            return Response.ok(Map.of(
+                    "tableName", tableName,
+                    "rowsAdded", rowsAdded,
+                    "status", "success"
+            )).build();
+            
+        } catch (Exception e) {
+            logger.error("Erreur lors de l'ajout du batch distant: {}", e.getMessage(), e);
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+                    .entity(Map.of("error", "Erreur lors de l'ajout du batch: " + e.getMessage()))
+                    .build();
+        }
     }
 }

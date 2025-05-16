@@ -23,16 +23,23 @@ import org.slf4j.LoggerFactory;
 
 import javax.enterprise.context.ApplicationScoped;
 import javax.inject.Inject;
+import com.memorydb.distribution.ClusterManager;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.ByteBuffer;
 import java.nio.channels.Channels;
 import java.nio.channels.ReadableByteChannel;
-import java.nio.file.Files;
 import java.util.*;
-import java.util.concurrent.*;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * Implémentation optimisée pour le chargement de fichiers Parquet 
@@ -45,8 +52,23 @@ public class VectorizedParquetLoader {
     @Inject
     private DatabaseContext databaseContext;
     
+    @Inject
+    private ClusterManager clusterManager;
+
     private ExecutorService executorService;
 
+    private HttpClient httpClient;
+    private ObjectMapper objectMapper;
+
+    // Création d'un client HTTP pour la distribution inter-nœuds
+    public VectorizedParquetLoader() {
+        this.httpClient = HttpClient.newBuilder()
+            .version(HttpClient.Version.HTTP_1_1)
+            .connectTimeout(java.time.Duration.ofSeconds(30))
+            .build();
+        this.objectMapper = new ObjectMapper();
+    }
+    
     /**
      * Charge un fichier Parquet dans une table existante
      * Utilise une approche de streaming par batch pour une meilleure gestion de la mémoire
@@ -802,11 +824,24 @@ public class VectorizedParquetLoader {
                         
                         // Process batch if full
                         if (currentRowsInBatch >= batchSize) {
-                            tableData.writeLock();
-                            try {
-                                addBatchToTable(tableData, batch);
-                            } finally {
-                                tableData.writeUnlock();
+                            // Si c'est le nœud local, ajouter directement à la table locale
+                            String localNodeId = clusterManager.getLocalNode().getId();
+                            if (nodeId.equals(localNodeId)) {
+                                tableData.writeLock();
+                                try {
+                                    addBatchToTable(tableData, batch);
+                                } finally {
+                                    tableData.writeUnlock();
+                                }
+                            } else {
+                                // Sinon, envoyer le batch au nœud distant
+                                try {
+                                    sendBatchToRemoteNode(currentNode, tableName, batch);
+                                } catch (Exception e) {
+                                    logger.error("[{}] Erreur lors de l'envoi des données au nœud {}: {}", 
+                                            sessionId, nodeId, e.getMessage(), e);
+                                    throw new IOException("Échec de la distribution des données: " + e.getMessage(), e);
+                                }
                             }
                             
                             // Update stats
@@ -818,7 +853,8 @@ public class VectorizedParquetLoader {
                             currentRowsInBatch = 0;
                             
                             if (currentRow % 100000 == 0) {
-                                logger.info("[{}] Progress: {} rows processed", sessionId, currentRow);
+                                logger.info("[{}] Progress: {} rows processed. Distribution actuelle: {}", 
+                                           sessionId, currentRow, nodeRows);
                             }
                         }
                         
@@ -829,16 +865,30 @@ public class VectorizedParquetLoader {
                     
                     // Process final partial batch if any
                     if (!batch.isEmpty()) {
-                        tableData.writeLock();
-                        try {
-                            addBatchToTable(tableData, batch);
-                        } finally {
-                            tableData.writeUnlock();
+                        com.memorydb.distribution.NodeInfo currentNode = nodes[nodeIndex];
+                        String nodeId = currentNode.getId();
+                        
+                        // Si c'est le nœud local, ajouter directement à la table locale
+                        String localNodeId = clusterManager.getLocalNode().getId();
+                        if (nodeId.equals(localNodeId)) {
+                            tableData.writeLock();
+                            try {
+                                addBatchToTable(tableData, batch);
+                            } finally {
+                                tableData.writeUnlock();
+                            }
+                        } else {
+                            // Sinon, envoyer le batch au nœud distant
+                            try {
+                                sendBatchToRemoteNode(currentNode, tableName, batch);
+                            } catch (Exception e) {
+                                logger.error("[{}] Erreur lors de l'envoi du dernier batch au nœud {}: {}", 
+                                        sessionId, nodeId, e.getMessage(), e);
+                                throw new IOException("Échec de la distribution des données: " + e.getMessage(), e);
+                            }
                         }
                         
                         // Update stats for last batch
-                        com.memorydb.distribution.NodeInfo currentNode = nodes[nodeIndex];
-                        String nodeId = currentNode.getId();
                         long previousCount = nodeRows.get(nodeId);
                         nodeRows.put(nodeId, previousCount + currentRowsInBatch);
                         stats.addNodeRows(nodeId, currentRowsInBatch);
@@ -870,6 +920,53 @@ public class VectorizedParquetLoader {
     /**
      * Ferme les ressources utilisées
      */
+    /**
+     * Envoie un batch de données à un nœud distant
+     * 
+     * @param node Nœud distant où envoyer les données
+     * @param tableName Nom de la table à mettre à jour
+     * @param batch Liste d'objets représentant les lignes à ajouter
+     * @throws IOException En cas d'erreur d'E/S ou de communication
+     */
+    private void sendBatchToRemoteNode(com.memorydb.distribution.NodeInfo node, String tableName, 
+                                      List<Object[]> batch) throws IOException {
+        try {
+            // Sérialisation du batch avec Jackson
+            Map<String, Object> payload = new HashMap<>();
+            payload.put("tableName", tableName);
+            payload.put("rows", batch);
+            
+            // Construction de l'URL du nœud distant
+            String url = String.format("http://%s:%d/api/tables/%s/add-batch", 
+                    node.getAddress(), node.getPort(), tableName);
+            
+            // Convertit le payload en JSON
+            String jsonPayload = objectMapper.writeValueAsString(payload);
+            
+            // Préparation de la requête HTTP
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(new URI(url))
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(jsonPayload))
+                    .build();
+            
+            // Envoi de la requête
+            HttpResponse<String> response = httpClient.send(request, 
+                    HttpResponse.BodyHandlers.ofString());
+            
+            // Vérification de la réponse
+            if (response.statusCode() != 200) {
+                throw new IOException("Erreur lors de l'envoi du batch au nœud " + node.getId() + 
+                        ": HTTP " + response.statusCode() + " - " + response.body());
+            }
+            
+        } catch (URISyntaxException | InterruptedException e) {
+            throw new IOException("Erreur lors de la communication avec le nœud distant: " + e.getMessage(), e);
+        }
+    }
+    
+    // Méthode asynchrone retirée car non utilisée dans l'implémentation actuelle
+
     public void shutdown() {
         if (executorService != null && !executorService.isShutdown()) {
             executorService.shutdown();
