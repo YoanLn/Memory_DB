@@ -8,42 +8,6 @@ NODE2="localhost:8082"
 NODE3="localhost:8083"
 PARQUET_FILE="data/test2.parquet"
 
-# Détecter si nous sommes dans un environnement universitaire avec proxy
-UNIVERSITY_ENV=false
-PROXY_SETTINGS=""
-
-# Fonction pour configurer l'environnement universitaire
-setup_university_env() {
-  # Activer le mode université
-  UNIVERSITY_ENV=true
-  
-  # Configuration des nœuds (remplacer par les adresses réelles de vos serveurs)
-  NODE1="$1"
-  NODE2="$2"
-  NODE3="$3"
-  
-  # Configuration du fichier Parquet (chemin absolu ou relatif selon besoin)
-  PARQUET_FILE="$4"
-  
-  # Configuration du proxy (blanc signifie pas de proxy)
-  PROXY="$5"
-  
-  if [ -n "$PROXY" ]; then
-    PROXY_SETTINGS="-x $PROXY"
-    echo "Proxy configuré: $PROXY"
-  else
-    # Ignorer tous les proxys
-    PROXY_SETTINGS="--noproxy '*'"
-    echo "Mode sans proxy activé"
-  fi
-  
-  echo "Environnement universitaire configuré:"
-  echo "- Nœud 1: $NODE1"
-  echo "- Nœud 2: $NODE2"
-  echo "- Nœud 3: $NODE3"
-  echo "- Fichier Parquet: $PARQUET_FILE"
-}
-
 # Pour un déploiement sur des machines physiques, modifiez ces valeurs:
 #NODE1="192.168.1.101:8080"
 #NODE2="192.168.1.102:8080"
@@ -111,27 +75,12 @@ load_distributed_small() {
 # Chargement distribué - Grand nombre de lignes
 load_distributed_large() {
   echo "Chargement distribué avec un grand nombre de lignes (sans limite)..."
-  
-  if [ "$UNIVERSITY_ENV" = true ]; then
-    # Version optimisée pour environnement universitaire
-    echo "Mode université activé - Utilisation de la configuration avec proxy: $PROXY_SETTINGS"
-    
-    # Utilisation de curl avec des options spécifiques pour l'environnement universitaire
-    curl $PROXY_SETTINGS -X POST \
-      -F "file=@$PARQUET_FILE" \
-      -F "rowLimit=-1" \
-      -F "batchSize=100000" \
-      -F "skipRows=0" \
-      "http://$NODE1/api/tables/parquet_file/load-distributed-upload"
-  else
-    # Version standard
-    curl --noproxy localhost -X POST \
-      -F "file=@$PARQUET_FILE" \
-      -F "rowLimit=-1" \
-      -F "batchSize=100000" \
-      -F "skipRows=0" \
-      "http://$NODE1/api/tables/parquet_file/load-distributed-upload"
-  fi
+  curl --noproxy localhost -X POST \
+    -F "file=@$PARQUET_FILE" \
+    -F "rowLimit=-1" \
+    -F "batchSize=100000" \
+    -F "skipRows=0" \
+    http://$NODE1/api/tables/parquet_file/load-distributed-upload
 }
 
 # Comptage des lignes dans un fichier Parquet sans chargement
@@ -139,22 +88,50 @@ count_parquet_rows() {
   echo "Comptage des lignes dans le fichier Parquet: $PARQUET_FILE..."
   
   # Utilisation du chargeur distribué avec rowLimit=0 pour simplement compter les lignes
-  if [ "$UNIVERSITY_ENV" = true ]; then
-    # Version pour environnement universitaire
-    curl $PROXY_SETTINGS -X POST \
-      -H "Content-Type: application/json" \
-      -d '{"filePath":"'"$PARQUET_FILE"'", "rowLimit":0, "skipRows":0, "batchSize":10000}' \
-      "http://$NODE1/api/tables/parquet_file/load-distributed"
-  else
-    # Version standard
-    curl --noproxy localhost -X POST \
-      -H "Content-Type: application/json" \
-      -d '{"filePath":"'"$PARQUET_FILE"'", "rowLimit":0, "skipRows":0, "batchSize":10000}' \
-      "http://$NODE1/api/tables/parquet_file/load-distributed"
-  fi
+  curl --noproxy localhost -X POST \
+    -H "Content-Type: application/json" \
+    -d '{"filePath":"'"$PARQUET_FILE"'", "rowLimit":0, "skipRows":0, "batchSize":10000}' \
+    http://$NODE1/api/tables/parquet_file/load-distributed
   
   echo ""
   echo "Note: Pour les chargements distribués, définir rowLimit à 20M au lieu de 30M est plus approprié pour éviter les problèmes de distribution."
+}
+
+# Chargement optimisé pour les environnements universitaires (proxy, quota disque limité)
+load_binary() {
+  local host=${1:-$NODE1}
+  local row_limit=${2:-"3"}
+  local batch_size=${3:-"100000"}
+  local file=${4:-"$PARQUET_FILE"}
+  
+  echo "Chargement binaire optimisé pour environnements universitaires..."
+  echo "Host: $host, Limite lignes: $row_limit, Batch: $batch_size"
+  
+  # Vérification de la présence du fichier
+  if [ -z "$file" ]; then
+    echo "ERREUR: Fichier Parquet non défini. Utilisez export PARQUET_FILE=/chemin/vers/fichier.parquet"
+    return 1
+  fi
+  
+  if [ ! -f "$file" ]; then
+    echo "ERREUR: Fichier Parquet introuvable: $file"
+    return 1
+  fi
+  
+  echo "Envoi du fichier: $file ($(du -h "$file" | cut -f1))"
+  
+  # Utilisation du mode binaire direct sans proxy et sans écriture sur disque
+  # --data-binary envoie le fichier directement sans conversion
+  # Ne pas utiliser -F qui crée un multipart/form-data et des fichiers temporaires
+  # -v pour obtenir des détails sur l'avancement et la réponse
+  curl -v --noproxy '*' \
+    -X POST \
+    -H "Content-Type: application/octet-stream" \
+    --data-binary @"$file" \
+    "http://$host/api/tables/parquet_file/load-binary?rowLimit=3&batchSize=1&skipRows=0"
+  
+  echo ""
+  echo "Chargement terminé. Vérifiez les statistiques avec: ./curl-commands.sh stats"
 }
 
 # Chargement en mode coordonnateur uniquement - pour configurations multi-PC
@@ -205,24 +182,12 @@ load_coordinator_only() {
 # Chargement distribué - Fichier complet
 load_distributed_full() {
   echo "Chargement du fichier Parquet complet en mode distribué..."
-  
-  if [ "$UNIVERSITY_ENV" = true ]; then
-    # Version optimisée pour environnement universitaire
-    curl $PROXY_SETTINGS -X POST \
-      -F "file=@$PARQUET_FILE" \
-      -F "rowLimit=-1" \
-      -F "batchSize=200000" \
-      -F "skipRows=0" \
-      "http://$NODE1/api/tables/parquet_file/load-distributed-upload"
-  else
-    # Version standard
-    curl --noproxy localhost -X POST \
-      -F "file=@$PARQUET_FILE" \
-      -F "rowLimit=-1" \
-      -F "batchSize=200000" \
-      -F "skipRows=0" \
-      "http://$NODE1/api/tables/parquet_file/load-distributed-upload"
-  fi
+  curl --noproxy localhost -X POST \
+    -F "file=@$PARQUET_FILE" \
+    -F "rowLimit=-1" \
+    -F "batchSize=200000" \
+    -F "skipRows=0" \
+    http://$NODE1/api/tables/parquet_file/load-distributed-upload
 }
 
 # Solution pour configuration universitaire avec 2 machines Linux
@@ -363,28 +328,16 @@ check_stats() {
   curl --noproxy localhost -s http://$NODE3/api/tables/parquet_file/stats | jq '.'
 }
 
-# Afficher les statistiques d'une table sur les 3 nœuds
+# Afficher les statistiques d'une table sur le nœud 1
 stats() {
   echo "Statistiques de la table sur le nœud 1:"
-  if [ "$UNIVERSITY_ENV" = true ]; then
-    curl $PROXY_SETTINGS -X GET "http://$NODE1/api/tables/parquet_file/stats"
-  else
-    curl --noproxy localhost -X GET "http://$NODE1/api/tables/parquet_file/stats"
-  fi
+  curl --noproxy localhost -X GET http://$NODE1/api/tables/parquet_file/stats
   
   echo "\nStatistiques de la table sur le nœud 2:"
-  if [ "$UNIVERSITY_ENV" = true ]; then
-    curl $PROXY_SETTINGS -X GET "http://$NODE2/api/tables/parquet_file/stats"
-  else
-    curl --noproxy localhost -X GET "http://$NODE2/api/tables/parquet_file/stats"
-  fi
+  curl --noproxy localhost -X GET http://$NODE2/api/tables/parquet_file/stats
   
   echo "\nStatistiques de la table sur le nœud 3:"
-  if [ "$UNIVERSITY_ENV" = true ]; then
-    curl $PROXY_SETTINGS -X GET "http://$NODE3/api/tables/parquet_file/stats"
-  else
-    curl --noproxy localhost -X GET "http://$NODE3/api/tables/parquet_file/stats"
-  fi
+  curl --noproxy localhost -X GET http://$NODE3/api/tables/parquet_file/stats
 }
 
 # Afficher les statistiques consolidées d'une table sur l'ensemble du cluster
@@ -393,18 +346,9 @@ consolidated_stats() {
   
   # Récupérer les statistiques de chaque nœud
   echo "Récupération des statistiques depuis tous les nœuds..."
-  
-  if [ "$UNIVERSITY_ENV" = true ]; then
-    # Version optimisée pour environnement universitaire
-    NODE1_STATS=$(curl $PROXY_SETTINGS -s -X GET "http://$NODE1/api/tables/parquet_file/stats")
-    NODE2_STATS=$(curl $PROXY_SETTINGS -s -X GET "http://$NODE2/api/tables/parquet_file/stats")
-    NODE3_STATS=$(curl $PROXY_SETTINGS -s -X GET "http://$NODE3/api/tables/parquet_file/stats")
-  else
-    # Version standard
-    NODE1_STATS=$(curl --noproxy localhost -s -X GET "http://$NODE1/api/tables/parquet_file/stats")
-    NODE2_STATS=$(curl --noproxy localhost -s -X GET "http://$NODE2/api/tables/parquet_file/stats")
-    NODE3_STATS=$(curl --noproxy localhost -s -X GET "http://$NODE3/api/tables/parquet_file/stats")
-  fi
+  NODE1_STATS=$(curl --noproxy localhost -s -X GET http://$NODE1/api/tables/parquet_file/stats)
+  NODE2_STATS=$(curl --noproxy localhost -s -X GET http://$NODE2/api/tables/parquet_file/stats)
+  NODE3_STATS=$(curl --noproxy localhost -s -X GET http://$NODE3/api/tables/parquet_file/stats)
   
   # Extraire les nombres de lignes
   NODE1_ROWS=$(echo $NODE1_STATS | grep -o '"rowCount":[0-9]*' | cut -d':' -f2)
@@ -550,6 +494,9 @@ case "$1" in
   load-full)
     load_distributed_full
     ;;
+  load-binary)
+    load_binary "${2:-$NODE1}" "${3:--1}" "${4:-100000}"
+    ;;
   stats)
     stats
     ;;
@@ -598,23 +545,11 @@ case "$1" in
     query_group_by_aggregates "${3:-PULocationID}" "${4:-trip_miles}"
     ;;
   university-setup)
-    # Format: ./curl-commands.sh university-setup node1_address node2_address node3_address parquet_file [proxy]
-    # Exemple: ./curl-commands.sh university-setup pc1234.univ.fr:8081 pc1235.univ.fr:8082 pc1236.univ.fr:8083 /chemin/vers/data.parquet http://proxy.univ.fr:3128
-    NODE1_ADDR="${2:-pc1234.univ.fr:8081}"
-    NODE2_ADDR="${3:-pc1235.univ.fr:8082}"
-    NODE3_ADDR="${4:-pc1236.univ.fr:8083}"
-    UNIV_FILE="${5:-/tmp/data.parquet}"
-    UNIV_PROXY="${6:-}"
-    
-    setup_university_env "$NODE1_ADDR" "$NODE2_ADDR" "$NODE3_ADDR" "$UNIV_FILE" "$UNIV_PROXY"
-    ;;
-    
-  university-test)
-    # Test l'environnement universitaire configuré
-    university_test
+    echo "Configuration pour environnement universitaire avec machines distinctes..."
+    university_setup "${2:-100}" "${3:-$NODE1}" "${4:-$PARQUET_FILE}"
     ;;
   *)
-    echo "Usage: ./curl-commands.sh [create|list|load-small|load-large|load-full|stats|stats-consolidated|count-rows|query|group-by|aggregates|delete|health|logs|debug|test-small|test-large|test-coordinator|university-setup|university-test]"
+    echo "Usage: ./curl-commands.sh [create|list|load-small|load-large|load-full|stats|stats-consolidated|count-rows|query|group-by|aggregates|delete|health|logs|debug|test-small|test-large|test-coordinator|university-setup]"
     echo ""
     echo "Exemples:"
     echo "  $0 create             - Crée la table parquet_file"
@@ -632,108 +567,3 @@ case "$1" in
     echo "  $0 health             - Vérifie l'état de santé du cluster"
     ;;
 esac
-
-# Test spécifique pour les machines universitaires
-university_test() {
-  echo "Test de l'environnement universitaire avec les paramètres actuels:"
-  echo "- Nœud 1: $NODE1"
-  echo "- Nœud 2: $NODE2"
-  echo "- Nœud 3: $NODE3"
-  echo "- Fichier Parquet: $PARQUET_FILE"
-  echo "- Proxy settings: $PROXY_SETTINGS"
-  echo "- Mode université: $UNIVERSITY_ENV"
-  echo ""
-  
-  # Vérifier la connectivité à chaque nœud
-  echo "Vérification de la connectivité aux nœuds..."
-  
-  if [ "$UNIVERSITY_ENV" = true ]; then
-    # Utiliser les paramètres proxy
-    echo "Test de connectivité au nœud 1 ($NODE1)..."
-    RESULT1=$(curl $PROXY_SETTINGS -s -o /dev/null -w "%{http_code}" "http://$NODE1/api/health" || echo "FAILED")
-    
-    echo "Test de connectivité au nœud 2 ($NODE2)..."
-    RESULT2=$(curl $PROXY_SETTINGS -s -o /dev/null -w "%{http_code}" "http://$NODE2/api/health" || echo "FAILED")
-    
-    echo "Test de connectivité au nœud 3 ($NODE3)..."
-    RESULT3=$(curl $PROXY_SETTINGS -s -o /dev/null -w "%{http_code}" "http://$NODE3/api/health" || echo "FAILED")
-  else
-    # Mode standard sans proxy
-    echo "Test de connectivité au nœud 1 ($NODE1)..."
-    RESULT1=$(curl --noproxy localhost -s -o /dev/null -w "%{http_code}" "http://$NODE1/api/health" || echo "FAILED")
-    
-    echo "Test de connectivité au nœud 2 ($NODE2)..."
-    RESULT2=$(curl --noproxy localhost -s -o /dev/null -w "%{http_code}" "http://$NODE2/api/health" || echo "FAILED")
-    
-    echo "Test de connectivité au nœud 3 ($NODE3)..."
-    RESULT3=$(curl --noproxy localhost -s -o /dev/null -w "%{http_code}" "http://$NODE3/api/health" || echo "FAILED")
-  fi
-  
-  # Vérifier le fichier Parquet
-  echo -e "\nVérification du fichier Parquet: $PARQUET_FILE"
-  if [ -f "$PARQUET_FILE" ]; then
-    echo "Le fichier existe et occupe $(du -h "$PARQUET_FILE" | cut -f1) d'espace disque"
-  else
-    echo "ERREUR: Le fichier n'existe pas ou n'est pas accessible"
-  fi
-  
-  # Résumé des résultats
-  echo -e "\nRésumé des tests:"
-  echo "- Nœud 1: $([ "$RESULT1" == "200" ] && echo "OK (code $RESULT1)" || echo "ECHEC (code $RESULT1)")"
-  echo "- Nœud 2: $([ "$RESULT2" == "200" ] && echo "OK (code $RESULT2)" || echo "ECHEC (code $RESULT2)")"
-  echo "- Nœud 3: $([ "$RESULT3" == "200" ] && echo "OK (code $RESULT3)" || echo "ECHEC (code $RESULT3)")"
-  echo "- Fichier Parquet: $([ -f "$PARQUET_FILE" ] && echo "OK" || echo "ECHEC")"
-}
-
-# Test spécifique pour les machines universitaires
-university_test() {
-  echo "Test de l'environnement universitaire avec les paramètres actuels:"
-  echo "- Nœud 1: $NODE1"
-  echo "- Nœud 2: $NODE2"
-  echo "- Nœud 3: $NODE3"
-  echo "- Fichier Parquet: $PARQUET_FILE"
-  echo "- Proxy settings: $PROXY_SETTINGS"
-  echo "- Mode université: $UNIVERSITY_ENV"
-  echo ""
-  
-  # Vérifier la connectivité à chaque nœud
-  echo "Vérification de la connectivité aux nœuds..."
-  
-  if [ "$UNIVERSITY_ENV" = true ]; then
-    # Utiliser les paramètres proxy
-    echo "Test de connectivité au nœud 1 ($NODE1)..."
-    RESULT1=$(curl $PROXY_SETTINGS -s -o /dev/null -w "%{http_code}" "http://$NODE1/api/health" 2>/dev/null || echo "FAILED")
-    
-    echo "Test de connectivité au nœud 2 ($NODE2)..."
-    RESULT2=$(curl $PROXY_SETTINGS -s -o /dev/null -w "%{http_code}" "http://$NODE2/api/health" 2>/dev/null || echo "FAILED")
-    
-    echo "Test de connectivité au nœud 3 ($NODE3)..."
-    RESULT3=$(curl $PROXY_SETTINGS -s -o /dev/null -w "%{http_code}" "http://$NODE3/api/health" 2>/dev/null || echo "FAILED")
-  else
-    # Mode standard sans proxy
-    echo "Test de connectivité au nœud 1 ($NODE1)..."
-    RESULT1=$(curl --noproxy localhost -s -o /dev/null -w "%{http_code}" "http://$NODE1/api/health" 2>/dev/null || echo "FAILED")
-    
-    echo "Test de connectivité au nœud 2 ($NODE2)..."
-    RESULT2=$(curl --noproxy localhost -s -o /dev/null -w "%{http_code}" "http://$NODE2/api/health" 2>/dev/null || echo "FAILED")
-    
-    echo "Test de connectivité au nœud 3 ($NODE3)..."
-    RESULT3=$(curl --noproxy localhost -s -o /dev/null -w "%{http_code}" "http://$NODE3/api/health" 2>/dev/null || echo "FAILED")
-  fi
-  
-  # Vérifier le fichier Parquet
-  echo -e "\nVérification du fichier Parquet: $PARQUET_FILE"
-  if [ -f "$PARQUET_FILE" ]; then
-    FILE_SIZE=$(du -h "$PARQUET_FILE" 2>/dev/null | cut -f1 || echo "inconnu")
-    echo "Le fichier existe et occupe $FILE_SIZE d'espace disque"
-  else
-    echo "ERREUR: Le fichier n'existe pas ou n'est pas accessible"
-  fi
-  
-  # Résumé des résultats
-  echo -e "\nRésumé des tests:"
-  echo "- Nœud 1: $([ "$RESULT1" = "200" ] && echo "OK (code $RESULT1)" || echo "ECHEC (code $RESULT1)")"
-  echo "- Nœud 2: $([ "$RESULT2" = "200" ] && echo "OK (code $RESULT2)" || echo "ECHEC (code $RESULT2)")"
-  echo "- Nœud 3: $([ "$RESULT3" = "200" ] && echo "OK (code $RESULT3)" || echo "ECHEC (code $RESULT3)")"
-  echo "- Fichier Parquet: $([ -f "$PARQUET_FILE" ] && echo "OK" || echo "ECHEC")"
-}

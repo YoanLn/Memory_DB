@@ -1,10 +1,15 @@
 package com.memorydb.parquet;
 
+import java.util.Map;
+import java.util.HashMap;
+
 /**
- * Statistiques de chargement d'un fichier Parquet
+ * Classe pour les statistiques de chargement de fichiers Parquet
+ * Supporté également le suivi des lignes par nœud pour la distribution
  */
 public class ParquetLoadStats {
-    private long rowsProcessed;
+    private long totalRowsProcessed;
+    private Map<String, Long> nodeRowsMap;
     private int batchCount;
     private long elapsedTimeMs;
     private boolean timeout;
@@ -14,7 +19,8 @@ public class ParquetLoadStats {
      * Constructeur par défaut
      */
     public ParquetLoadStats() {
-        this.rowsProcessed = 0;
+        this.totalRowsProcessed = 0;
+        this.nodeRowsMap = new HashMap<>();
         this.batchCount = 0;
         this.elapsedTimeMs = 0;
         this.timeout = false;
@@ -22,27 +28,54 @@ public class ParquetLoadStats {
     }
     
     /**
-     * Obtient le nombre de lignes traitées
-     * @return Nombre de lignes
+     * Obtient le nombre total de lignes traitées
+     * @return Nombre total de lignes
      */
     public long getRowsProcessed() {
-        return rowsProcessed;
+        return totalRowsProcessed;
     }
     
     /**
-     * Définit le nombre de lignes traitées
-     * @param rowsProcessed Nombre de lignes
+     * Définit le nombre total de lignes traitées
+     * @param rowsProcessed Nombre total de lignes
      */
     public void setRowsProcessed(long rowsProcessed) {
-        this.rowsProcessed = rowsProcessed;
+        this.totalRowsProcessed = rowsProcessed;
     }
     
     /**
-     * Incrémente le nombre de lignes traitées
+     * Incrémente le nombre total de lignes traitées
      * @param count Nombre de lignes à ajouter
      */
     public void incrementRowsProcessed(long count) {
-        this.rowsProcessed += count;
+        this.totalRowsProcessed += count;
+    }
+    
+    /**
+     * Ajoute des lignes à un nœud spécifique
+     * @param nodeId Identifiant du nœud
+     * @param count Nombre de lignes
+     */
+    public void addNodeRows(String nodeId, long count) {
+        nodeRowsMap.put(nodeId, nodeRowsMap.getOrDefault(nodeId, 0L) + count);
+        incrementRowsProcessed(count);
+    }
+    
+    /**
+     * Obtient le nombre de lignes pour un nœud spécifique
+     * @param nodeId Identifiant du nœud
+     * @return Nombre de lignes attribuées au nœud, 0 si aucune
+     */
+    public long getNodeRows(String nodeId) {
+        return nodeRowsMap.getOrDefault(nodeId, 0L);
+    }
+    
+    /**
+     * Obtient la carte complète des lignes par nœud
+     * @return Map des lignes par nœud
+     */
+    public Map<String, Long> getNodeRowsMap() {
+        return new HashMap<>(nodeRowsMap);
     }
     
     /**
@@ -123,16 +156,24 @@ public class ParquetLoadStats {
      */
     public double getRowsPerSecond() {
         if (elapsedTimeMs <= 0) return 0;
-        return (rowsProcessed * 1000.0) / elapsedTimeMs;
+        return (totalRowsProcessed * 1000.0) / elapsedTimeMs;
     }
     
     @Override
     public String toString() {
         StringBuilder sb = new StringBuilder();
-        sb.append("Lignes traitées: ").append(rowsProcessed);
+        sb.append("Lignes traitées: ").append(totalRowsProcessed);
         sb.append(", Batchs: ").append(batchCount);
         sb.append(", Temps: ").append(elapsedTimeMs / 1000.0).append("s");
         sb.append(", Vitesse: ").append(String.format("%.2f", getRowsPerSecond())).append(" lignes/s");
+        
+        // Ajouter détails de distribution par nœud si disponible
+        if (!nodeRowsMap.isEmpty()) {
+            sb.append("\nDistribution par nœud: ");
+            for (Map.Entry<String, Long> entry : nodeRowsMap.entrySet()) {
+                sb.append("\n  ").append(entry.getKey()).append(": ").append(entry.getValue());
+            }
+        }
         
         if (timeout) {
             sb.append(" (Timeout)");

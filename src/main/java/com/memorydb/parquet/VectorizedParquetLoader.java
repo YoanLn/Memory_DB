@@ -23,7 +23,14 @@ import org.slf4j.LoggerFactory;
 
 import javax.enterprise.context.ApplicationScoped;
 import javax.inject.Inject;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.nio.ByteBuffer;
+import java.nio.channels.Channels;
+import java.nio.channels.ReadableByteChannel;
+import java.nio.file.Files;
 import java.util.*;
 import java.util.concurrent.*;
 
@@ -547,6 +554,317 @@ public class VectorizedParquetLoader {
         }
         
         return stats;
+    }
+    
+    /**
+     * Charge un fichier Parquet depuis un flux d'entrée sans écriture sur disque
+     * Cette méthode est optimisée pour les environnements avec quotas limités
+     * 
+     * @param tableName Nom de la table où charger les données
+     * @param inputStream Flux contenant les données Parquet
+     * @param options Options de chargement
+     * @return Statistiques de chargement
+     * @throws IOException En cas d'erreur d'E/S
+     */
+    public ParquetLoadStats loadParquetFileFromStream(String tableName, InputStream inputStream, 
+                                                    ParquetLoadOptions options) throws IOException {
+        String sessionId = UUID.randomUUID().toString();
+        logger.info("[{}] Début du chargement streaming pour la table {}", sessionId, tableName);
+        
+        // Création d'un fichier temporaire en mémoire (RAM disk si disponible)
+        File tempFile = null;
+        try {
+            // Utilise /dev/shm sur Linux si disponible (RAM disk), sinon un dossier temp standard
+            File tempDir = new File("/dev/shm");
+            if (!tempDir.exists() || !tempDir.canWrite()) {
+                tempDir = new File(System.getProperty("java.io.tmpdir"));
+            }
+            
+            tempFile = File.createTempFile("parquet_stream_", ".parquet", tempDir);
+            tempFile.deleteOnExit(); // Garantit la suppression à la fin
+            
+            // Tranfère le flux en utilisant NIO pour plus d'efficacité
+            try (ReadableByteChannel readChannel = Channels.newChannel(inputStream);
+                 FileOutputStream fileOS = new FileOutputStream(tempFile)) {
+                
+                ByteBuffer buffer = ByteBuffer.allocateDirect(64 * 1024); // Buffer de 64KB
+                long totalBytes = 0;
+                int bytesRead;
+                
+                while ((bytesRead = readChannel.read(buffer)) != -1) {
+                    buffer.flip();
+                    fileOS.getChannel().write(buffer);
+                    buffer.clear();
+                    totalBytes += bytesRead;
+                    
+                    if (totalBytes % (10 * 1024 * 1024) == 0) { // Log tous les 10MB
+                        logger.debug("[{}] {} MB transférés dans le buffer temporaire", 
+                                   sessionId, totalBytes / (1024 * 1024));
+                    }
+                }
+                
+                logger.info("[{}] Flux Parquet transféré en mémoire: {} MB", 
+                           sessionId, totalBytes / (1024 * 1024));
+            }
+            
+            // Maintenant charge depuis ce fichier temporaire
+            ParquetLoadStats stats = loadParquetFile(tableName, tempFile.getAbsolutePath(), options);
+            logger.info("[{}] Chargement streaming terminé: {} lignes en {} ms", 
+                       sessionId, stats.getRowsProcessed(), stats.getElapsedTimeMs());
+            
+            return stats;
+            
+        } finally {
+            // Supprime le fichier temporaire
+            if (tempFile != null && tempFile.exists()) {
+                boolean deleted = tempFile.delete();
+                if (!deleted) {
+                    logger.warn("[{}] Impossible de supprimer le fichier temporaire: {}", 
+                              sessionId, tempFile.getAbsolutePath());
+                    // Garantit la suppression au mieux
+                    tempFile.deleteOnExit();
+                }
+            }
+        }
+    }
+    
+    /**
+     * Compte le nombre de lignes dans un flux Parquet sans charger les données
+     * 
+     * @param inputStream Flux contenant les données Parquet
+     * @return Statistiques sur le fichier Parquet
+     * @throws IOException En cas d'erreur d'E/S
+     */
+    public ParquetLoadStats countParquetRowsFromStream(InputStream inputStream) throws IOException {
+        String sessionId = UUID.randomUUID().toString();
+        logger.info("[{}] Début du comptage de lignes dans un flux Parquet", sessionId);
+        
+        // Création d'un fichier temporaire en mémoire (RAM disk si disponible)
+        File tempFile = null;
+        try {
+            // Utilise /dev/shm sur Linux si disponible (RAM disk), sinon un dossier temp standard
+            File tempDir = new File("/dev/shm");
+            if (!tempDir.exists() || !tempDir.canWrite()) {
+                tempDir = new File(System.getProperty("java.io.tmpdir"));
+            }
+            
+            tempFile = File.createTempFile("parquet_count_", ".parquet", tempDir);
+            tempFile.deleteOnExit(); // Garantit la suppression à la fin
+            
+            // Transfert le flux efficacement
+            try (ReadableByteChannel readChannel = Channels.newChannel(inputStream);
+                 FileOutputStream fileOS = new FileOutputStream(tempFile)) {
+                
+                ByteBuffer buffer = ByteBuffer.allocateDirect(64 * 1024); // Buffer de 64KB
+                while (readChannel.read(buffer) != -1) {
+                    buffer.flip();
+                    fileOS.getChannel().write(buffer);
+                    buffer.clear();
+                }
+            }
+            
+            // Compte les lignes depuis ce fichier temporaire
+            ParquetLoadStats stats = countParquetRows(tempFile.getAbsolutePath());
+            logger.info("[{}] Comptage de lignes terminé: {} lignes en {} ms", 
+                       sessionId, stats.getRowsProcessed(), stats.getElapsedTimeMs());
+            
+            return stats;
+            
+        } finally {
+            // Supprime le fichier temporaire
+            if (tempFile != null && tempFile.exists()) {
+                boolean deleted = tempFile.delete();
+                if (!deleted) {
+                    logger.warn("[{}] Impossible de supprimer le fichier temporaire: {}", 
+                              sessionId, tempFile.getAbsolutePath());
+                    // Garantit la suppression au mieux
+                    tempFile.deleteOnExit();
+                }
+            }
+        }
+    }
+    
+    /**
+     * Charge un fichier Parquet depuis un flux avec distribution entre plusieurs nœuds
+     * 
+     * @param tableName Nom de la table où charger les données
+     * @param inputStream Flux contenant les données Parquet
+     * @param options Options de chargement
+     * @param nodes Tableau des nœuds pour la distribution
+     * @return Statistiques de chargement avec informations par nœud
+     * @throws IOException En cas d'erreur d'E/S
+     */
+    public ParquetLoadStats loadParquetFileFromStreamDistributed(String tableName, InputStream inputStream, 
+                                                              ParquetLoadOptions options, 
+                                                              com.memorydb.distribution.NodeInfo[] nodes) 
+                                                              throws IOException {
+        String sessionId = UUID.randomUUID().toString();
+        logger.info("[{}] Début du chargement streaming distribué entre {} nœuds pour {}", 
+                   sessionId, nodes.length, tableName);
+        
+        ParquetLoadStats stats = new ParquetLoadStats();
+        long startTime = System.currentTimeMillis();
+        
+        // Création d'un fichier temporaire en mémoire (RAM disk si disponible)
+        File tempFile = null;
+        try {
+            // Utilise /dev/shm sur Linux si disponible (RAM disk), sinon un dossier temp standard
+            File tempDir = new File("/dev/shm");
+            if (!tempDir.exists() || !tempDir.canWrite()) {
+                tempDir = new File(System.getProperty("java.io.tmpdir"));
+            }
+            
+            tempFile = File.createTempFile("parquet_distrib_", ".parquet", tempDir);
+            tempFile.deleteOnExit(); // Garantit la suppression à la fin
+            
+            // Transfert le flux efficacement
+            try (ReadableByteChannel readChannel = Channels.newChannel(inputStream);
+                 FileOutputStream fileOS = new FileOutputStream(tempFile)) {
+                
+                ByteBuffer buffer = ByteBuffer.allocateDirect(64 * 1024); // Buffer de 64KB
+                long totalBytes = 0;
+                int bytesRead;
+                
+                while ((bytesRead = readChannel.read(buffer)) != -1) {
+                    buffer.flip();
+                    fileOS.getChannel().write(buffer);
+                    buffer.clear();
+                    totalBytes += bytesRead;
+                }
+                
+                logger.info("[{}] Flux Parquet transféré en mémoire: {} MB", 
+                           sessionId, totalBytes / (1024 * 1024));
+            }
+            
+            // Maintenant charge avec distribution par blocs
+            // Vérifie que la table existe
+            Table table = databaseContext.getTable(tableName);
+            if (table == null) {
+                throw new IllegalArgumentException("Table introuvable: " + tableName);
+            }
+            
+            TableData tableData = databaseContext.getTableData(tableName);
+            
+            // Ouvre le fichier Parquet pour vérifier le schéma
+            Path path = new Path(tempFile.getAbsolutePath());
+            Configuration conf = new Configuration();
+            
+            // Indique à Hadoop et Parquet de garder les fichiers ouverts
+            conf.set("fs.hdfs.impl.disable.cache", "false");
+            conf.set("parquet.read.support.class", "org.apache.parquet.hadoop.example.GroupReadSupport");
+            conf.set("parquet.filter.record-level.enabled", "true");
+            
+            try (ParquetFileReader schemaReader = ParquetFileReader.open(HadoopInputFile.fromPath(path, conf))) {
+                MessageType schema = schemaReader.getFooter().getFileMetaData().getSchema();
+                validateSchema(table, schema);
+                
+                // Configuration pour la distribution par blocs
+                int batchSize = options.getBatchSize();
+                int skipRows = options.getSkipRows();
+                long rowLimit = options.getRowLimit();
+                
+                // Répartition des lignes entre les nœuds en utilisant un approche par blocs
+                try (ParquetReader<Group> reader = ParquetReader.builder(new GroupReadSupport(), path)
+                        .withConf(conf)
+                        .build()) {
+                    
+                    // Skip initial rows if needed
+                    Group record = null;
+                    for (int i = 0; i < skipRows && reader.read() != null; i++) {
+                        // Skipping
+                    }
+                    
+                    int nodeIndex = 0;
+                    List<Object[]> batch = new ArrayList<>(batchSize);
+                    List<Column> columns = table.getColumns();
+                    
+                    long currentRow = 0;
+                    int currentRowsInBatch = 0;
+                    Map<String, Long> nodeRows = new HashMap<>();
+                    
+                    // Initialize node counts
+                    for (com.memorydb.distribution.NodeInfo node : nodes) {
+                        nodeRows.put(node.getId(), 0L);
+                    }
+                    
+                    // Process all rows or up to row limit
+                    while ((record = reader.read()) != null && 
+                           (rowLimit <= 0 || currentRow < rowLimit)) {
+                        
+                        // Get node for this row (round-robin)
+                        com.memorydb.distribution.NodeInfo currentNode = nodes[nodeIndex];
+                        String nodeId = currentNode.getId();
+                        
+                        // Extract row values and add to batch
+                        Object[] rowValues = extractValues(record, columns, schema);
+                        batch.add(rowValues);
+                        currentRowsInBatch++;
+                        
+                        // Process batch if full
+                        if (currentRowsInBatch >= batchSize) {
+                            tableData.writeLock();
+                            try {
+                                addBatchToTable(tableData, batch);
+                            } finally {
+                                tableData.writeUnlock();
+                            }
+                            
+                            // Update stats
+                            long previousCount = nodeRows.get(nodeId);
+                            nodeRows.put(nodeId, previousCount + currentRowsInBatch);
+                            stats.addNodeRows(nodeId, currentRowsInBatch);
+                            
+                            batch.clear();
+                            currentRowsInBatch = 0;
+                            
+                            if (currentRow % 100000 == 0) {
+                                logger.info("[{}] Progress: {} rows processed", sessionId, currentRow);
+                            }
+                        }
+                        
+                        // Move to next node for round-robin
+                        nodeIndex = (nodeIndex + 1) % nodes.length;
+                        currentRow++;
+                    }
+                    
+                    // Process final partial batch if any
+                    if (!batch.isEmpty()) {
+                        tableData.writeLock();
+                        try {
+                            addBatchToTable(tableData, batch);
+                        } finally {
+                            tableData.writeUnlock();
+                        }
+                        
+                        // Update stats for last batch
+                        com.memorydb.distribution.NodeInfo currentNode = nodes[nodeIndex];
+                        String nodeId = currentNode.getId();
+                        long previousCount = nodeRows.get(nodeId);
+                        nodeRows.put(nodeId, previousCount + currentRowsInBatch);
+                        stats.addNodeRows(nodeId, currentRowsInBatch);
+                    }
+                    
+                    // Update final stats
+                    stats.setElapsedTimeMs(System.currentTimeMillis() - startTime);
+                    
+                    logger.info("[{}] Chargement distribué terminé: {} lignes total, distribution par nœud: {}", 
+                              sessionId, stats.getRowsProcessed(), nodeRows);
+                }
+            }
+            
+            return stats;
+            
+        } finally {
+            // Cleanup temp file
+            if (tempFile != null && tempFile.exists()) {
+                boolean deleted = tempFile.delete();
+                if (!deleted) {
+                    logger.warn("[{}] Impossible de supprimer le fichier temporaire: {}", 
+                              sessionId, tempFile.getAbsolutePath());
+                    tempFile.deleteOnExit();
+                }
+            }
+        }
     }
     
     /**

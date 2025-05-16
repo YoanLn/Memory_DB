@@ -11,6 +11,7 @@ import javax.inject.Singleton;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.Map;
@@ -206,6 +207,111 @@ public class DistributedParquetLoader {
         return NodeClient.sendLoadSpecificRowRequest(node, tableName, payload);
     }
     
+    /**
+     * Charge les données Parquet depuis un flux d'entrée de manière distribuée
+     * Cette méthode évite l'écriture sur disque pour optimiser les environnements avec quotas limités
+     * 
+     * @param tableName Le nom de la table où charger les données
+     * @param inputStream Le flux contenant les données Parquet
+     * @param options Les options de chargement
+     * @return Une map contenant le nombre de lignes chargées par nœud
+     * @throws IOException En cas d'erreur d'E/S
+     */
+    public Map<String, Long> loadDistributedFromStream(String tableName, InputStream inputStream, 
+                                                     ParquetLoadOptions options) throws IOException {
+        // Obtient les nœuds du cluster
+        Collection<NodeInfo> nodes = clusterManager.getAllNodes();
+        Map<String, Long> resultMap = new HashMap<>();
+        String sessionId = java.util.UUID.randomUUID().toString();
+        
+        // Initialise les résultats à 0 pour tous les nœuds
+        for (NodeInfo node : nodes) {
+            resultMap.put(node.getId(), 0L);
+        }
+        
+        logger.info("[{}] Début du chargement en streaming distribué pour la table {}", sessionId, tableName);
+        
+        // Si un seul nœud, pas besoin de distribution
+        if (nodes.size() <= 1) {
+            logger.info("[{}] Mode distribué ignoré - un seul nœud disponible", sessionId);
+            ParquetLoadStats stats = parquetLoader.loadParquetFileFromStream(tableName, inputStream, options);
+            resultMap.put(clusterManager.getLocalNode().getId(), stats.getRowsProcessed());
+            return resultMap;
+        }
+        
+        // Calcul de la taille totale approximative des données
+        // Note: Marquer le flux comme supportant le mark/reset si disponible
+        if (inputStream.markSupported()) {
+            inputStream.mark(1024*1024); // marque avec un buffer de 1MB
+        }
+        
+        // Détermine le nombre total de lignes à charger
+        long totalRows;
+        
+        if (options.getRowLimit() > 0) {
+            // Utilise directement la limite comme nombre total de lignes
+            totalRows = options.getRowLimit();
+            logger.info("[{}] Distribution avec limite de {} lignes", sessionId, totalRows);
+        } else {
+            try {
+                // Compte sans charger (uniquement si le flux supporte le mark/reset)
+                if (inputStream.markSupported()) {
+                    long startTime = System.currentTimeMillis();
+                    ParquetLoadStats countStats = parquetLoader.countParquetRowsFromStream(inputStream);
+                    long countDuration = System.currentTimeMillis() - startTime;
+                    
+                    // Revenir au début du flux
+                    inputStream.reset();
+                    
+                    totalRows = countStats.getRowsProcessed();
+                    logger.info("[{}] Nombre de lignes dans le flux: {} (comptage en {} ms)", 
+                                sessionId, totalRows, countDuration);
+                } else {
+                    // Pour les flux ne supportant pas le mark/reset, utiliser une valeur arbitrairement grande
+                    // qui sera ajustée lors du chargement réel
+                    totalRows = Long.MAX_VALUE;
+                    logger.info("[{}] Flux ne supportant pas le mark/reset - utilisation du mode adaptatif", sessionId);
+                }
+            } catch (Exception e) {
+                logger.warn("[{}] Erreur lors du comptage des lignes: {}, utilisation du mode adaptatif", 
+                            sessionId, e.getMessage());
+                totalRows = Long.MAX_VALUE;
+            }
+        }
+        
+        // Prépare la distribution en mode streaming - nécessite une stratégie différente
+        // Convertit les nœuds en array pour itération indexée
+        NodeInfo[] nodeArray = nodes.toArray(new NodeInfo[0]);
+        int nodeCount = nodeArray.length;
+        
+        logger.info("[{}] Distribution des données en streaming entre {} nœuds", sessionId, nodeCount);
+        
+        // Pour le streaming, nous chargeons sur le nœud local et distribuons les données par blocs aux autres nœuds
+        // Cette approche évite l'écriture sur disque mais nécessite plus de transferts réseau
+        try {
+            // Charge localement les données avec traitement par lot
+            ParquetLoadStats stats = parquetLoader.loadParquetFileFromStreamDistributed(
+                tableName, inputStream, options, nodeArray);
+            
+            for (int i = 0; i < nodeCount; i++) {
+                NodeInfo node = nodeArray[i];
+                long nodeRows = stats.getNodeRows(node.getId());
+                resultMap.put(node.getId(), nodeRows);
+                
+                logger.info("[{}] Nœud {} a reçu {} lignes", sessionId, node.getId(), nodeRows);
+            }
+            
+            logger.info("[{}] Chargement streaming distribué terminé: total {} lignes en {} ms", 
+                    sessionId, stats.getRowsProcessed(), stats.getElapsedTimeMs());
+            
+        } catch (Exception e) {
+            logger.error("[{}] Erreur lors du chargement streaming distribué: {}", sessionId, e.getMessage(), e);
+            throw new IOException("Erreur lors du chargement streaming distribué: " + e.getMessage(), e);
+        }
+        
+        return resultMap;
+    }
+
     /**
      * Envoie une demande de chargement d'une plage de lignes à un nœud distant
      * Cette méthode est utilisée pour l'optimisation de chargement des grands ensembles de données

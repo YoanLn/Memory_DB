@@ -1108,82 +1108,10 @@ public class TableResource {
      * @throws IOException Si une erreur d'E/S se produit
      */
     private File saveToTempFile(InputStream inputStream) throws IOException {
-        // Déterminer si nous sommes dans un environnement universitaire
-        boolean isUniversityEnv = isUniversityEnvironment();
-        
-        if (isUniversityEnv) {
-            logger.info("Environnement universitaire détecté, utilisation du mode optimisé pour machines avec ressources limitées");
-            
-            // Configure un répertoire personnalisé pour les uploads si nécessaire
-            String userDir = System.getProperty("user.home");
-            String uploadDir = userDir + "/memorydb_uploads";
-            try {
-                // Tente de configurer un répertoire dans le home de l'utilisateur
-                File dir = new File(uploadDir);
-                if (!dir.exists()) {
-                    dir.mkdirs();
-                }
-                
-                if (dir.canWrite()) {
-                    com.memorydb.util.UniversityBufferIO.setUploadDirectory(uploadDir);
-                    logger.info("Répertoire d'upload défini sur: {}", uploadDir);
-                }
-            } catch (Exception e) {
-                logger.warn("Impossible de configurer le répertoire d'upload personnalisé: {}", e.getMessage());
-            }
-            
-            // Utilise le mode optimisé pour université avec des buffers plus petits et des flush plus fréquents
-            return com.memorydb.util.UniversityBufferIO.saveToTempFile(inputStream, "univ_upload_", ".parquet");
-        } else {
-            // Mode standard pour environnements sans contraintes
-            logger.info("Utilisation du mode standard pour le téléchargement de fichier");
-            return DirectBufferIO.saveToTempFile(inputStream, "parquet_upload_", ".parquet");
-        }
-    }
-    
-    /**
-     * Détecte si l'application s'exécute dans un environnement universitaire
-     * en cherchant des indices dans le système
-     * @return true si nous sommes probablement dans un environnement universitaire
-     */
-    private boolean isUniversityEnvironment() {
-        // Recherche les indices d'un environnement universitaire
-        try {
-            // Vérifie si la variable UNIVERSITY_ENV est définie
-            String envFlag = System.getProperty("UNIVERSITY_ENV");
-            if (envFlag != null && (envFlag.equals("1") || envFlag.equalsIgnoreCase("true"))) {
-                return true;
-            }
-            
-            // Recherche de chemins typiques dans les universités
-            String userDir = System.getProperty("user.dir");
-            String userName = System.getProperty("user.name");
-            
-            // Chemins typiques des universités
-            if (userDir != null) {
-                if (userDir.contains("/users/nfs/Etu") || 
-                    userDir.contains("/home/students/") ||
-                    userDir.contains("/etu/") ||
-                    userDir.contains("/ppti-")) {
-                    logger.info("Environnement universitaire détecté basé sur le répertoire: {}", userDir);
-                    return true;
-                }
-            }
-            
-            // Détection basée sur les limitations de mémoire
-            Runtime rt = Runtime.getRuntime();
-            long maxMem = rt.maxMemory();
-            if (maxMem < 1024 * 1024 * 512) { // Moins de 512 MB
-                logger.info("Environnement avec mémoire limitée détecté ({} MB), activation du mode université", maxMem / (1024 * 1024));
-                return true;
-            }
-            
-            // Par défaut, suppose que nous ne sommes pas dans un environnement universitaire
-            return false;
-        } catch (Exception e) {
-            logger.warn("Erreur lors de la détection d'environnement: {}", e.getMessage());
-            return false;
-        }
+        // Utilise la nouvelle classe DirectBufferIO pour des performances optimales
+        // Cette implémentation utilise un ByteBuffer direct (hors heap Java)
+        // qui réduit considérablement la pression sur le GC
+        return DirectBufferIO.saveToTempFile(inputStream, "parquet_upload_", ".parquet");
     }
     
     /**
@@ -1330,6 +1258,87 @@ public class TableResource {
             
         } catch (Exception e) {
             logger.error("Erreur lors du comptage des lignes: {}", e.getMessage(), e);
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+                    .entity("Erreur: " + e.getMessage())
+                    .build();
+        }
+    }
+    
+    /**
+     * Endpoint optimisé pour les environnements avec proxy - accepte des données binaires directement
+     * Charge un fichier Parquet via données binaires et le distribue entre les nœuds sans écriture sur disque
+     * 
+     * @param tableName Le nom de la table
+     * @param inputStream Le flux binaire direct contenant les données Parquet
+     * @param rowLimit Paramètre optionnel pour limiter le nombre de lignes
+     * @param batchSize Paramètre optionnel pour définir la taille des lots
+     * @param skipRows Paramètre optionnel pour sauter des lignes au début
+     * @return La réponse HTTP indiquant si le chargement a réussi
+     */
+    @POST
+    @Path("/{tableName}/load-binary")
+    @Consumes(MediaType.APPLICATION_OCTET_STREAM)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response loadDistributedBinary(
+            @PathParam("tableName") String tableName,
+            InputStream inputStream,
+            @QueryParam("rowLimit") @DefaultValue("-1") long rowLimit,
+            @QueryParam("batchSize") @DefaultValue("100000") int batchSize,
+            @QueryParam("skipRows") @DefaultValue("0") int skipRows) {
+        try {
+            // Vérifie que la table existe
+            if (!databaseContext.tableExists(tableName)) {
+                return Response.status(Response.Status.NOT_FOUND)
+                        .entity("Table inconnue: " + tableName)
+                        .build();
+            }
+            
+            if (inputStream == null) {
+                return Response.status(Response.Status.BAD_REQUEST)
+                        .entity("Le flux de données Parquet est obligatoire")
+                        .build();
+            }
+            
+            logger.info("Reçu un flux binaire Parquet pour la table '{}' avec params: rowLimit={}, batchSize={}, skipRows={}", 
+                    tableName, rowLimit, batchSize, skipRows);
+            
+            // Options de chargement
+            ParquetLoadOptions options = new ParquetLoadOptions();
+            options.setRowLimit(rowLimit);
+            options.setBatchSize(batchSize);
+            options.setSkipRows(skipRows);
+            options.setUseDirectAccess(true);  // Optimiser pour l'accès direct aux données
+            
+            // Chargement distribué en streaming sans écriture sur disque
+            Map<String, Long> distributionStats;
+            long startTime = System.currentTimeMillis();
+            
+            try {
+                // Utilisation du chargeur distribué en mode streaming
+                distributionStats = distributedParquetLoader.loadDistributedFromStream(
+                        tableName, inputStream, options);
+                
+                long duration = System.currentTimeMillis() - startTime;
+                logger.info("Flux Parquet distribué et chargé avec succès en {} ms", duration);
+            } catch (Exception e) {
+                logger.error("Erreur lors du chargement distribué depuis le flux binaire: {}", e.getMessage(), e);
+                return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+                        .entity("Erreur lors du chargement distribué: " + e.getMessage())
+                        .build();
+            }
+            
+            // Construction de la réponse
+            Map<String, Object> result = new HashMap<>();
+            result.put("tableName", tableName);
+            result.put("distributionStats", distributionStats);
+            result.put("totalRowsLoaded", 
+                    distributionStats.values().stream().mapToLong(Long::longValue).sum());
+            result.put("message", "Données Parquet binaires chargées avec succès en mode distribué");
+            result.put("elapsedMs", System.currentTimeMillis() - startTime);
+            
+            return Response.ok(result).build();
+        } catch (Exception e) {
+            logger.error("Erreur lors du chargement distribué depuis le flux binaire: {}", e.getMessage(), e);
             return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
                     .entity("Erreur: " + e.getMessage())
                     .build();

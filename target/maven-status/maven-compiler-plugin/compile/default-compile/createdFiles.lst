@@ -61,6 +61,7 @@ com/memorydb/query/ConditionType.class
 com/memorydb/query/SQLParser.class
 com/memorydb/distribution/NodeClient$2.class
 com/memorydb/index/BitmapIndex.class
+com/memorydb/distribution/NodeClient$8.class
 com/memorydb/query/Condition$Operator.class
 com/memorydb/storage/ColumnStore$1.class
 com/memorydb/query/Condition$1.class
