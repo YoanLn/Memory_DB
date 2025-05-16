@@ -395,6 +395,46 @@ public class NodeClient {
      * @param batchSize Taille des lots pour le chargement
      * @return true si la demande a réussi, false sinon
      */
+    
+    /**
+     * Récupère les statistiques d'une table sur un nœud distant
+     * 
+     * @param node Le nœud distant à interroger
+     * @param tableName Le nom de la table à analyser
+     * @return Les statistiques de la table (rowCount, columns, etc.), ou null en cas d'échec
+     */
+    public static Map<String, Object> getTableStats(NodeInfo node, String tableName) {
+        try {
+            // Construction de l'URL de l'endpoint des statistiques
+            String url = String.format("http://%s:%d/api/tables/%s/stats", 
+                    node.getAddress(), node.getPort(), tableName);
+            
+            logger.info("Récupération des statistiques pour la table '{}' sur le nœud {}", 
+                    tableName, node.getId());
+            
+            // Envoie la requête GET
+            Response response = client.target(url)
+                    .request(MediaType.APPLICATION_JSON)
+                    .get();
+            
+            // Vérifie si la requête a réussi
+            if (response.getStatus() == Response.Status.OK.getStatusCode()) {
+                // Lecture des statistiques de la réponse
+                Map<String, Object> stats = response.readEntity(new GenericType<Map<String, Object>>() {});
+                logger.debug("Statistiques de la table '{}' reçues du nœud {}", tableName, node.getId());
+                return stats;
+            } else {
+                logger.warn("Impossible de récupérer les statistiques de la table '{}' sur le nœud {}: {} - {}", 
+                        tableName, node.getId(), response.getStatus(), response.readEntity(String.class));
+                return null;
+            }
+        } catch (Exception e) {
+            logger.error("Erreur lors de la récupération des statistiques pour '{}' sur le nœud {}: {}", 
+                    tableName, node.getId(), e.getMessage(), e);
+            return null;
+        }
+    }
+    
     public static boolean sendLoadRangeRequest(NodeInfo node, String tableName, String filePath, 
                                                 int startRow, int rowCount, int batchSize) {
         try {

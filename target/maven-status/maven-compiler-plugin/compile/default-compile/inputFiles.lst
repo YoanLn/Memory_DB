@@ -22,6 +22,7 @@
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/rest/ExportResource.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/core/Table.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/query/ConditionType.java
+/Users/yoanln/MemoryDB/src/main/java/com/memorydb/util/DirectBufferIO.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/storage/ColumnStore.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/distribution/NodeInfo.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/common/DataType.java

@@ -5,6 +5,7 @@ import com.memorydb.core.Column;
 import com.memorydb.core.DatabaseContext;
 import com.memorydb.core.Table;
 import com.memorydb.distribution.ClusterManager;
+import com.memorydb.util.DirectBufferIO;
 import com.memorydb.distribution.DistributedParquetLoader;
 import com.memorydb.parquet.ParquetLoadOptions;
 import com.memorydb.parquet.ParquetLoader;
@@ -25,12 +26,8 @@ import javax.ws.rs.*;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.util.UUID;
-
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -539,14 +536,15 @@ public class TableResource {
                     .build();
         }
     }
-
+    
     /**
-     * Obtient des statistiques sur les données d'une table
+     * Récupère les statistiques d'une table
      * @param tableName Le nom de la table
-     * @return Les statistiques
+     * @return Les statistiques de la table
      */
     @GET
     @Path("/{tableName}/stats")
+    @Produces(MediaType.APPLICATION_JSON)
     public Response getTableStats(@PathParam("tableName") String tableName) {
         try {
             // Vérifie que la table existe
@@ -1102,79 +1100,170 @@ public class TableResource {
     }
     
     /**
-     * Méthode utilitaire pour sauvegarder le fichier téléchargé
+     * Méthode utilitaire optimisée pour sauvegarder le fichier téléchargé
+     * Utilise des ByteBuffers directs pour améliorer les performances et réduire la pression sur le GC
+     * 
      * @param inputStream Le flux d'entrée du fichier
      * @return Le fichier temporaire créé
+     * @throws IOException Si une erreur d'E/S se produit
      */
     private File saveToTempFile(InputStream inputStream) throws IOException {
-        String sessionId = UUID.randomUUID().toString();
-        logger.info("[{}] Début de la sauvegarde d'un fichier téléchargé", sessionId);
-        logger.info("[{}] Répertoire temporaire système: {}", sessionId, System.getProperty("java.io.tmpdir"));
-        
-        // Vérifier que l'InputStream n'est pas null
-        if (inputStream == null) {
-            logger.error("[{}] ERREUR: InputStream est null", sessionId);
-            throw new IOException("InputStream est null");
-        }
-        
-        // Création du fichier temporaire
-        File tempFile = File.createTempFile("parquet_upload_", ".parquet");
-        logger.info("[{}] Fichier temporaire créé: {}", sessionId, tempFile.getAbsolutePath());
-        
-        // Assurer que le fichier est accessible en lecture pour tous les processus
-        tempFile.setReadable(true, false);
-        tempFile.setWritable(true, false);
-        logger.info("[{}] Permissions configurées - lisible: {}, écritable: {}", 
-                sessionId, tempFile.canRead(), tempFile.canWrite());
-        
-        // Copier le contenu de l'InputStream vers le fichier temporaire
-        long totalBytes = 0;
-        try (FileOutputStream out = new FileOutputStream(tempFile)) {
-            byte[] buffer = new byte[8192];
-            int bytesRead;
-            while ((bytesRead = inputStream.read(buffer)) != -1) {
-                out.write(buffer, 0, bytesRead);
-                totalBytes += bytesRead;
+        // Utilise la nouvelle classe DirectBufferIO pour des performances optimales
+        // Cette implémentation utilise un ByteBuffer direct (hors heap Java)
+        // qui réduit considérablement la pression sur le GC
+        return DirectBufferIO.saveToTempFile(inputStream, "parquet_upload_", ".parquet");
+    }
+    
+    /**
+     * Obtient des statistiques consolidées sur une table depuis tous les nœuds du cluster
+     * Cette méthode agrège les statistiques de tous les nœuds pour donner une vue globale de la table
+     * 
+     * @param tableName Le nom de la table
+     * @return Les statistiques consolidées de la table sur l'ensemble du cluster
+     */
+    @GET
+    @Path("/{tableName}/stats-consolidated")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response getConsolidatedTableStats(@PathParam("tableName") String tableName) {
+        try {
+            // Vérifie que la table existe
+            if (!databaseContext.tableExists(tableName)) {
+                return Response.status(Response.Status.NOT_FOUND)
+                        .entity("Table inconnue: " + tableName)
+                        .build();
+            }
+
+            // Récupère les statistiques de tous les nœuds du cluster
+            Map<String, Map<String, Object>> allNodesStats = clusterManager.getAllNodesStats(tableName);
+            
+            // Si aucun nœud ne contient de statistiques, retourne une erreur
+            if (allNodesStats.isEmpty()) {
+                return Response.status(Response.Status.NOT_FOUND)
+                        .entity("Aucune statistique disponible pour la table: " + tableName)
+                        .build();
+            }
+            
+            // Prépare les statistiques consolidées
+            Map<String, Object> consolidatedStats = new HashMap<>();
+            consolidatedStats.put("tableName", tableName);
+            
+            // Initialisation pour l'agrégation
+            long totalRowCount = 0;
+            Map<String, Map<String, Object>> columnStats = new HashMap<>();
+            
+            // Parcours des résultats de chaque nœud pour agréger les données
+            for (Map.Entry<String, Map<String, Object>> nodeEntry : allNodesStats.entrySet()) {
+                // Le nom du nœud peut être utilisé pour le logging ou pour des statistiques détaillées par nœud
+                // String nodeName = nodeEntry.getKey();
+                Map<String, Object> nodeStats = nodeEntry.getValue();
                 
-                // Log périodique pour les gros fichiers
-                if (totalBytes % (10 * 1024 * 1024) == 0) {
-                    logger.info("[{}] Progression: {} Mo écrits", sessionId, totalBytes / (1024 * 1024));
+                // Ajoute le nombre de lignes du nœud au total
+                if (nodeStats.containsKey("rowCount")) {
+                    totalRowCount += ((Number) nodeStats.get("rowCount")).longValue();
+                }
+                
+                // Traite les statistiques des colonnes
+                if (nodeStats.containsKey("columns")) {
+                    @SuppressWarnings("unchecked")
+                    List<Map<String, Object>> columns = (List<Map<String, Object>>) nodeStats.get("columns");
+                    
+                    // Pour chaque colonne dans les statistiques du nœud
+                    for (Map<String, Object> column : columns) {
+                        String columnName = (String) column.get("name");
+                        
+                        // Ajoute ou met à jour les stats de cette colonne
+                        if (!columnStats.containsKey(columnName)) {
+                            // Première fois qu'on rencontre cette colonne
+                            Map<String, Object> newColumnStats = new HashMap<>();
+                            newColumnStats.put("name", columnName);
+                            newColumnStats.put("type", column.get("type"));
+                            newColumnStats.put("nullable", column.get("nullable"));
+                            newColumnStats.put("nullCount", ((Number) column.get("nullCount")).longValue());
+                            newColumnStats.put("nonNullCount", ((Number) column.get("nonNullCount")).longValue());
+                            columnStats.put(columnName, newColumnStats);
+                        } else {
+                            // Met à jour les stats existantes pour cette colonne
+                            Map<String, Object> existingStats = columnStats.get(columnName);
+                            long currentNullCount = ((Number) existingStats.get("nullCount")).longValue();
+                            long currentNonNullCount = ((Number) existingStats.get("nonNullCount")).longValue();
+                            
+                            // Ajoute les compteurs de ce nœud
+                            existingStats.put("nullCount", currentNullCount + ((Number) column.get("nullCount")).longValue());
+                            existingStats.put("nonNullCount", currentNonNullCount + ((Number) column.get("nonNullCount")).longValue());
+                        }
+                    }
                 }
             }
-        } catch (IOException e) {
-            logger.error("[{}] Erreur lors de l'écriture du fichier: {}", sessionId, e.getMessage(), e);
-            throw e;
-        }
-        
-        // Vérification finale du fichier
-        if (!tempFile.exists()) {
-            logger.error("[{}] ERREUR: Le fichier n'existe pas après l'écriture", sessionId);
-            throw new IOException("Le fichier temporaire n'a pas été créé correctement");
-        }
-        
-        // Vérification basique de l'en-tête Parquet (signature 'PAR1')
-        try (FileInputStream fis = new FileInputStream(tempFile)) {
-            byte[] header = new byte[4];
-            int headerSize = fis.read(header);
-            if (headerSize == 4) {
-                String headerStr = new String(header);
-                logger.info("[{}] En-tête du fichier: '{}'", sessionId, headerStr);
-                if (!headerStr.equals("PAR1")) {
-                    logger.warn("[{}] ATTENTION: En-tête non conforme à Parquet", sessionId);
-                }
-            } else {
-                logger.warn("[{}] ATTENTION: Impossible de lire 4 octets d'en-tête", sessionId);
-            }
+            
+            // Ajout des statistiques consolidées au résultat final
+            consolidatedStats.put("rowCount", totalRowCount);
+            consolidatedStats.put("columns", new ArrayList<>(columnStats.values()));
+            consolidatedStats.put("nodeCount", allNodesStats.size());
+            consolidatedStats.put("message", "Statistiques consolidées de " + allNodesStats.size() + " nœuds");
+            
+            return Response.ok(consolidatedStats).build();
+            
         } catch (Exception e) {
-            logger.warn("[{}] ATTENTION: Erreur lors de la vérification de l'en-tête: {}", sessionId, e.getMessage());
-            // On continue malgré cette erreur
+            logger.error("Erreur lors de la récupération des statistiques consolidées: {}", e.getMessage(), e);
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+                    .entity("Erreur: " + e.getMessage())
+                    .build();
         }
-        
-        logger.info("[{}] Fichier temporaire créé avec succès: {} (taille: {} octets)", 
-                sessionId, tempFile.getAbsolutePath(), tempFile.length());
-        return tempFile;
     }
 
+    /**
+     * Compte le nombre de lignes dans un fichier Parquet sans charger les données
+     * @param payload Informations sur le fichier à analyser (filePath)
+     * @return Le nombre de lignes dans le fichier
+     */
+    @POST
+    @Path("/count-parquet-rows")
+    public Response countParquetRows(Map<String, Object> payload) {
+        try {
+            // Récupère le chemin du fichier
+            String filePath = (String) payload.get("filePath");
+            if (filePath == null || filePath.isEmpty()) {
+                return Response.status(Response.Status.BAD_REQUEST)
+                        .entity("Le chemin du fichier est obligatoire")
+                        .build();
+            }
+            
+            logger.info("Comptage des lignes dans le fichier Parquet: {}", filePath);
+            
+            // Vérifie que le fichier existe
+            File file = new File(filePath);
+            if (!file.exists() || !file.isFile()) {
+                return Response.status(Response.Status.NOT_FOUND)
+                        .entity("Le fichier n'existe pas: " + filePath)
+                        .build();
+            }
+            
+            // Compte les lignes dans le fichier
+            ParquetLoadStats stats = vectorizedParquetLoader.countParquetRows(filePath);
+            
+            // Construit la réponse
+            Map<String, Object> response = new HashMap<>();
+            response.put("filePath", filePath);
+            response.put("rowCount", stats.getRowsProcessed());
+            response.put("elapsedMs", stats.getElapsedTimeMs());
+            
+            if (stats.getError() != null) {
+                response.put("error", stats.getError());
+                return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+                        .entity(response)
+                        .build();
+            }
+            
+            return Response.ok(response).build();
+            
+        } catch (Exception e) {
+            logger.error("Erreur lors du comptage des lignes: {}", e.getMessage(), e);
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+                    .entity("Erreur: " + e.getMessage())
+                    .build();
+        }
+    }
+    
     /**
      * Classe de requête pour le chargement de fichiers Parquet
      */

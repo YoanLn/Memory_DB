@@ -176,7 +176,11 @@ delete_table() {
   local table_name="$1"
   
   echo "Suppression de la table $table_name..."
-  curl --noproxy localhost -X DELETE "http://$NODE1/api/tables/$table_name"
+  curl --noproxy localhost -X DELETE "http://$NODE1/api/table/$table_name"
+  
+  # Si la méthode ci-dessus ne fonctionne pas, essayez l'alternative
+  echo "\nSi la méthode ci-dessus ne fonctionne pas, essayez:\n"
+  echo "curl --noproxy localhost -X DELETE \"http://$NODE1/api/tables/$table_name\""
 }
 
 # Traitement des arguments

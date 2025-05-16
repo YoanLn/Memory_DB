@@ -679,4 +679,94 @@ public class ClusterManager {
         // Cette implémentation basique ne fait rien pour le moment
         logger.info("Rééquilibrage des données non implémenté");
     }
+    
+    /**
+     * Récupère les statistiques d'une table depuis tous les nœuds du cluster
+     * Cette méthode interroge chaque nœud pour obtenir ses statistiques locales
+     * 
+     * @param tableName Le nom de la table
+     * @return Une map contenant les statistiques de chaque nœud (clé = id du nœud, valeur = statistiques)
+     */
+    public Map<String, Map<String, Object>> getAllNodesStats(String tableName) {
+        logger.info("Récupération des statistiques pour la table '{}' sur tous les nœuds", tableName);
+        Map<String, Map<String, Object>> allStats = new HashMap<>();
+        
+        // Obtenir les statistiques du nœud local d'abord
+        try {
+            if (databaseContext.tableExists(tableName)) {
+                Map<String, Object> localStats = getLocalTableStats(tableName);
+                allStats.put(localNode.getId(), localStats);
+                logger.debug("Statistiques locales récupérées pour la table '{}'", tableName);
+            }
+        } catch (Exception e) {
+            logger.error("Erreur lors de la récupération des statistiques locales pour '{}': {}", 
+                    tableName, e.getMessage(), e);
+        }
+        
+        // Pour chaque nœud distant, récupérer ses statistiques en parallèle
+        List<NodeInfo> remoteNodes = clusterNodes.values().stream()
+                .filter(node -> !node.getId().equals(localNode.getId()))
+                .toList();
+        
+        // Créer les tâches pour récupérer les statistiques en parallèle
+        List<Map.Entry<String, Map<String, Object>>> remoteResults = Collections.synchronizedList(new ArrayList<>());
+        
+        // Lancer toutes les requêtes en parallèle
+        for (NodeInfo node : remoteNodes) {
+            executorService.submit(() -> {
+                try {
+                    Map<String, Object> nodeStats = NodeClient.getTableStats(node, tableName);
+                    if (nodeStats != null) {
+                        remoteResults.add(Map.entry(node.getId(), nodeStats));
+                        logger.debug("Statistiques récupérées pour la table '{}' sur le nœud {}", 
+                                tableName, node.getId());
+                    }
+                } catch (Exception e) {
+                    logger.error("Erreur lors de la récupération des statistiques pour '{}' sur le nœud {}: {}", 
+                            tableName, node.getId(), e.getMessage(), e);
+                }
+            });
+        }
+        
+        // Attendre que toutes les requêtes soient terminées
+        try {
+            // Attente courte pour laisser le temps aux requêtes de se terminer
+            Thread.sleep(1000);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        
+        // Ajouter tous les résultats à la map principale
+        for (Map.Entry<String, Map<String, Object>> entry : remoteResults) {
+            allStats.put(entry.getKey(), entry.getValue());
+        }
+        
+        logger.info("Statistiques récupérées pour {} nœuds sur la table '{}'", allStats.size(), tableName);
+        return allStats;
+    }
+    
+    /**
+     * Récupère les statistiques locales d'une table
+     * 
+     * @param tableName Le nom de la table
+     * @return Les statistiques de la table sur ce nœud
+     */
+    private Map<String, Object> getLocalTableStats(String tableName) {
+        // Vérifier si la table existe
+        if (!databaseContext.tableExists(tableName)) {
+            return null;
+        }
+        
+        // Utiliser l'API locale pour récupérer les statistiques
+        // Cela évite de dupliquer le code de calcul des statistiques
+        // et assure la cohérence entre les différentes parties de l'application
+        NodeInfo localNode = getLocalNode();
+        try {
+            return NodeClient.getTableStats(localNode, tableName);
+        } catch (Exception e) {
+            logger.error("Erreur lors de la récupération des statistiques locales pour '{}': {}", 
+                    tableName, e.getMessage(), e);
+            return null;
+        }
+    }
 } 
