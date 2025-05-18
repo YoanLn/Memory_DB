@@ -137,10 +137,14 @@ public class QueryExecutor {
      * @return Les lignes groupées
      */
     private Map<GroupKey, List<Integer>> groupRows(TableData tableData, List<Integer> rows, List<String> groupByColumns) {
+        // Ensure logger is available, assuming it's defined at class level: private static final Logger logger = LoggerFactory.getLogger(QueryExecutor.class);
         // Si pas de GROUP BY, on crée un seul groupe avec toutes les lignes
         if (groupByColumns.isEmpty()) {
+            logger.debug("[Node specific log] groupRows: No groupBy columns specified. Returning single group with {} rows.", rows.size());
             return Collections.singletonMap(new GroupKey(Collections.emptyList()), rows);
         }
+        
+        logger.info("[Node specific log] groupRows received {} rows to process. Grouping by: {}", rows.size(), groupByColumns);
         
         // Groupe les lignes par les valeurs des colonnes GROUP BY
         Map<GroupKey, List<Integer>> groupedRows = new HashMap<>();
@@ -150,15 +154,40 @@ public class QueryExecutor {
             
             for (String columnName : groupByColumns) {
                 ColumnStore columnStore = tableData.getColumnStore(columnName);
+                if (columnStore == null) {
+                    logger.error("[Node specific log] CRITICAL: ColumnStore for groupBy column '{}' is NULL. RowIndex: {}. Adding NULL to group key values.", columnName, rowIndex);
+                    groupKeyValues.add(null); // Add null if column store is missing, to avoid NPE and see key formation
+                    continue; // Skip to next column
+                }
                 Object value = extractValue(rowIndex, columnStore);
                 groupKeyValues.add(value);
             }
             
             GroupKey groupKey = new GroupKey(groupKeyValues);
+
+            // Enhanced logging for VendorID or single group-by column scenarios
+            if (groupByColumns.contains("VendorID") || groupByColumns.size() == 1) {
+                String currentColumnName = groupByColumns.get(0); // Assuming single for this specific log or focusing on first if multiple
+                Object extractedGroupValue = groupKeyValues.isEmpty() ? "[N/A]" : groupKeyValues.get(0);
+                logger.info("[Node specific log] RowIndex: {}, For Column: '{}', Extracted Value: {}, Type: {}. Formed GroupKey values: {}", 
+                            rowIndex, 
+                            currentColumnName, 
+                            extractedGroupValue, 
+                            (extractedGroupValue != null ? extractedGroupValue.getClass().getName() : "null"), 
+                            groupKey.getValues());
+            }
             
-            groupedRows.computeIfAbsent(groupKey, k -> new ArrayList<>()).add(rowIndex);
+            groupedRows.computeIfAbsent(groupKey, k -> {
+                logger.debug("[Node specific log] Creating new list for group key: {}", k.getValues());
+                return new ArrayList<>();
+            }).add(rowIndex);
         }
         
+        logger.info("[Node specific log] groupRows finished. Total groups formed: {}", groupedRows.size());
+        for (Map.Entry<GroupKey, List<Integer>> entry : groupedRows.entrySet()) {
+            logger.info("[Node specific log] Final Group Content: Key={}, Number of Rows in this Group={}", 
+                        entry.getKey().getValues(), entry.getValue().size());
+        }
         return groupedRows;
     }
     
@@ -200,96 +229,85 @@ public class QueryExecutor {
      * @param selectColumns Les colonnes à sélectionner
      * @param groupedRows Les lignes groupées
      * @param groupByColumns Les colonnes de groupement
-     * @param aggregateFunctions Les fonctions d'agrégation
+     * @param queryAggregateFunctions Les fonctions d'agrégation
      * @return Le résultat de la requête
      */
     private QueryResult createResult(
-            TableData tableData,
-            List<String> selectColumns,
-            Map<GroupKey, List<Integer>> groupedRows,
-            List<String> groupByColumns,
-            Map<String, AggregateFunction> aggregateFunctions) {
+        TableData tableData,
+        List<String> selectColumns, 
+        Map<GroupKey, List<Integer>> groupedRows,
+        List<String> groupByColumns, 
+        Map<String, AggregateFunction> queryAggregateFunctions) {
         
-        List<String> resultColumns = new ArrayList<>();
-        List<Map<String, Object>> rows = new ArrayList<>();
-        
-        // Ajoute les colonnes de groupement aux colonnes de résultat
+        List<String> finalResultColumnNames = new ArrayList<>();
+        List<Map<String, Object>> resultRowMaps = new ArrayList<>();
+
+        // 1. Determine result column names: group-by columns first, then aggregate aliases.
+        //    Also include any other selected columns that are not part of group-by or aggregates for completeness.
         for (String groupByColumn : groupByColumns) {
-            if (!resultColumns.contains(groupByColumn)) {
-                resultColumns.add(groupByColumn);
+            if (!finalResultColumnNames.contains(groupByColumn)) {
+                finalResultColumnNames.add(groupByColumn);
             }
         }
-        
-        // Ajoute les colonnes sélectionnées aux colonnes de résultat
-        for (String selectColumn : selectColumns) {
-            // Si la colonne a une fonction d'agrégation, on l'ajoute avec le nom de la fonction
-            AggregateFunction function = aggregateFunctions.get(selectColumn);
-            if (function != null) {
-                String columnName = function.getName() + "(" + selectColumn + ")";
-                if (!resultColumns.contains(columnName)) {
-                    resultColumns.add(columnName);
+        if (queryAggregateFunctions != null) {
+            for (String alias : queryAggregateFunctions.keySet()) {
+                if (!finalResultColumnNames.contains(alias)) {
+                    finalResultColumnNames.add(alias);
                 }
-            } else if (!resultColumns.contains(selectColumn)) {
-                // Sinon, on l'ajoute telle quelle
-                resultColumns.add(selectColumn);
             }
         }
         
-        // Traite chaque groupe
-        for (Map.Entry<GroupKey, List<Integer>> entry : groupedRows.entrySet()) {
-            GroupKey groupKey = entry.getKey();
-            List<Integer> groupRows = entry.getValue();
-            
-            Map<String, Object> resultRow = new HashMap<>();
-            
-            // Ajoute les valeurs des colonnes de groupement
+        // Process each group
+        for (Map.Entry<GroupKey, List<Integer>> groupEntry : groupedRows.entrySet()) {
+            GroupKey groupKey = groupEntry.getKey();
+            List<Integer> rowsInGroup = groupEntry.getValue();
+            Map<String, Object> currentRowMap = new HashMap<>();
+
+            // A. Add group-by column values to the current row map
             for (int i = 0; i < groupByColumns.size(); i++) {
                 String columnName = groupByColumns.get(i);
                 Object value = (groupKey.getValues().size() > i) ? groupKey.getValues().get(i) : null;
-                resultRow.put(columnName, value);
+                currentRowMap.put(columnName, value);
             }
-            
-            // Traite les colonnes sélectionnées
-            for (String selectColumn : selectColumns) {
-                // Si la colonne a une fonction d'agrégation, on applique la fonction
-                AggregateFunction function = aggregateFunctions.get(selectColumn);
-                if (function != null) {
-                    String resultColumnName = function.getName() + "(" + selectColumn + ")";
-                    ColumnStore columnStore = tableData.getColumnStore(selectColumn);
-                    Object aggregateValue = computeAggregate(function, columnStore, groupRows);
-                    resultRow.put(resultColumnName, aggregateValue);
-                } else if (groupByColumns.contains(selectColumn)) {
-                    // Si la colonne est dans le GROUP BY, on a déjà ajouté sa valeur
-                    continue;
-                } else if (groupRows.size() == 1) {
-                    // Si le groupe contient une seule ligne, on peut afficher la valeur directement
-                    ColumnStore columnStore = tableData.getColumnStore(selectColumn);
-                    Object value = extractValue(groupRows.get(0), columnStore);
-                    resultRow.put(selectColumn, value);
-                } else {
-                    // Sinon, on ne peut pas afficher la valeur (nécessite un agrégat)
-                    throw new IllegalArgumentException(
-                        "La colonne '" + selectColumn + "' doit être dans la clause GROUP BY " +
-                        "ou utilisée avec une fonction d'agrégation");
+
+            // B. Compute and add aggregate function values to the current row map
+            if (queryAggregateFunctions != null) {
+                for (Map.Entry<String, AggregateFunction> aggDefEntry : queryAggregateFunctions.entrySet()) {
+                    String alias = aggDefEntry.getKey(); 
+                    AggregateFunction aggFunc = aggDefEntry.getValue();
+                    
+                    ColumnStore targetColumnStoreForAgg = null; 
+                    
+                    // For non-COUNT aggregates, we would ideally resolve the target column here.
+                    // The Query object or another mechanism should provide alias -> target_column_for_aggregation.
+                    // Current `computeAggregate` handles null ColumnStore by returning null or throwing if it's strictly needed.
+                    // For non-COUNT aggregates, if targetColumnStoreForAgg remains null, computeAggregate will throw an
+                    // IllegalArgumentException if the function requires a non-null ColumnStore, which is the correct behavior for now.
+                    // If aggFunc is COUNT, a null targetColumnStoreForAgg is acceptable for computeAggregate.
+                    
+                    Object aggregateValue = computeAggregate(aggFunc, targetColumnStoreForAgg, rowsInGroup);
+                    currentRowMap.put(alias, aggregateValue); 
                 }
             }
-            
-            rows.add(resultRow);
+            resultRowMaps.add(currentRowMap);
         }
         
-        return new QueryResult(resultColumns, rows);
+        return new QueryResult(finalResultColumnNames, resultRowMaps);
     }
     
     /**
      * Calcule une valeur agrégée
      * @param function La fonction d'agrégation
-     * @param columnStore Le stockage de colonne
-     * @param rows Les index des lignes
+     * @param columnStore Le stockage de colonne pour les agrégats comme SUM, MIN, MAX, AVG. Peut être null pour COUNT.
+     * @param rows Les index des lignes à agréger
      * @return La valeur agrégée
      */
     private Object computeAggregate(AggregateFunction function, ColumnStore columnStore, List<Integer> rows) {
         if (rows.isEmpty()) {
-            return null;
+            if (function == AggregateFunction.COUNT) {
+                return 0L; 
+            }
+            return null; 
         }
         
         switch (function) {
@@ -297,20 +315,25 @@ public class QueryExecutor {
                 return (long) rows.size();
                 
             case SUM:
+                if (columnStore == null) throw new IllegalArgumentException("ColumnStore cannot be null for SUM aggregate.");
                 return computeSum(columnStore, rows);
                 
             case AVG:
-                Object sum = computeSum(columnStore, rows);
-                if (sum instanceof Number) {
-                    double numericSum = ((Number) sum).doubleValue();
-                    return numericSum / rows.size();
+                if (columnStore == null) throw new IllegalArgumentException("ColumnStore cannot be null for AVG aggregate.");
+                Object sumResult = computeSum(columnStore, rows);
+                if (sumResult instanceof Number) {
+                    double numericSum = ((Number) sumResult).doubleValue();
+                    return numericSum / rows.size(); 
                 }
-                return null;
+                // If sumResult is null (e.g., all values in column were null), AVG is null.
+                return null; 
                 
             case MIN:
+                if (columnStore == null) throw new IllegalArgumentException("ColumnStore cannot be null for MIN aggregate.");
                 return computeMin(columnStore, rows);
                 
             case MAX:
+                if (columnStore == null) throw new IllegalArgumentException("ColumnStore cannot be null for MAX aggregate.");
                 return computeMax(columnStore, rows);
                 
             default:

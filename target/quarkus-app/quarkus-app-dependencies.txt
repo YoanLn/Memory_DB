@@ -141,6 +141,7 @@ javax.servlet:javax.servlet-api::jar:3.1.0
 javax.ws.rs:jsr311-api::jar:1.1.1
 javax.xml.bind:jaxb-api::jar:2.2.11
 log4j:log4j::jar:1.2.17
+mysql:mysql-connector-java::jar:8.0.17
 net.minidev:accessors-smart::jar:2.4.7
 net.minidev:json-smart::jar:2.4.7
 org.apache.avro:avro::jar:1.11.1

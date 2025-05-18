@@ -267,7 +267,8 @@ public class ClusterManager {
     private void processGroupedResults(List<Map<String, Object>> results, Query query, Map<String, Map<String, Object>> groupedResults) {
         List<String> groupByColumns = query.getGroupByColumns();
         Map<String, AggregateFunction> aggregateFunctions = query.getAggregateFunctions();
-        
+        Map<String, Map<String, Object>> mergedGroups = new HashMap<>();
+
         // Log pour le débogage
         logger.info("Traitement de {} lignes avec {} colonnes GROUP BY et {} fonctions d'agrégation", 
                 results.size(), groupByColumns.size(), aggregateFunctions.size());
@@ -353,130 +354,70 @@ public class ClusterManager {
                 for (String groupCol : groupByColumns) {
                     newRow.put(groupCol, row.get(groupCol));
                 }
-                
-                // Initialise les colonnes d'agrégation
+                // Initialize aggregates in newRow directly from the current 'row'
                 for (Map.Entry<String, AggregateFunction> entry : aggregateFunctions.entrySet()) {
-                    String colName = entry.getKey();
+                    String aggAlias = entry.getKey(); // e.g., "count", "sum_value"
                     AggregateFunction function = entry.getValue();
-                    String resultCol;
-                    
-                    // Détermine la colonne résultat selon la fonction
-                    if (function == AggregateFunction.COUNT) {
-                        resultCol = colName; // Pour COUNT, utilise directement le nom spécifié
-                        newRow.put(resultCol, 1L); // Démarre le compteur à 1
+                    Object valueFromRow = null;
+
+                    // Attempt to get the value using the alias or common names
+                    // For COUNT, usually the alias is 'count'. For others, it might be 'sum_colName', 'min_colName' etc.
+                    // or the direct result of QueryExecutor might already name it as 'colName' if not ambiguous.
+                    if (row.containsKey(aggAlias)) {
+                        valueFromRow = row.get(aggAlias);
+                    } else if (function == AggregateFunction.COUNT && row.containsKey("count")) { // Common case for COUNT output from QueryExecutor
+                        valueFromRow = row.get("count");
                     } else {
-                        // Extract the actual column name without any prefix
-                        String actualColName = colName;
-                        if (colName.contains("_")) {
-                            String[] parts = colName.split("_", 2);
-                            if (parts.length > 1 && (parts[0].equals("sum") || parts[0].equals("avg") || 
-                                                    parts[0].equals("min") || parts[0].equals("max"))) {
-                                actualColName = parts[1];
-                                logger.info("Extracted actual column name: {} from prefixed name: {}", actualColName, colName);
+                        // Fallback: attempt to find by original column name for functions other than COUNT if alias is prefixed
+                        // This part might need refinement based on how QueryExecutor names aggregate outputs
+                        String originalColName = aggAlias;
+                        if (aggAlias.contains("_")) {
+                            String[] parts = aggAlias.split("_", 2);
+                            if (parts.length > 1 && (parts[0].equals("sum") || parts[0].equals("avg") || parts[0].equals("min") || parts[0].equals("max"))) {
+                                originalColName = parts[1];
                             }
                         }
-                        
-                        // First try to get the value directly
-                        Object value = row.get(colName);
-                        
-                        // If no value found with the prefixed name, try with the actual column name
-                        if (value == null && !actualColName.equals(colName)) {
-                            value = row.get(actualColName);
-                            if (value != null) {
-                                logger.info("Found value using extracted column name {}: {}", actualColName, value);
-                            }
+                        if (row.containsKey(originalColName)) {
+                            valueFromRow = row.get(originalColName);
                         }
-                        
-                        // Essaie avec différents noms préfixés comme solution de repli
-                        if (value == null) {
-                            String prefixedName = null;
-                            switch (function) {
-                                case SUM:
-                                    prefixedName = "sum_" + actualColName;
-                                    break;
-                                case AVG:
-                                    prefixedName = "avg_" + actualColName;
-                                    break;
-                                case MIN:
-                                    prefixedName = "min_" + actualColName;
-                                    break;
-                                case MAX:
-                                    prefixedName = "max_" + actualColName;
-                                    break;
-                                case COUNT:
-                                    // Pour COUNT on garde le nom d'origine
-                                    prefixedName = "count";
-                                    break;
-                            }
-                            
-                            if (prefixedName != null) {
-                                if (row.containsKey(prefixedName)) {
-                                    value = row.get(prefixedName);
-                                    logger.info("Utilisation de la valeur préfixée: {} = {}", prefixedName, value);
-                                } else {
-                                    // Tenter une recherche insensible à la casse
-                                    for (String key : row.keySet()) {
-                                        if (key.equalsIgnoreCase(prefixedName) || 
-                                            key.equalsIgnoreCase(actualColName)) {
-                                            value = row.get(key);
-                                            logger.info("Trouvé valeur avec correspondance insensible à la casse: {} -> {}", key, value);
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
+                    }
+                    
+                    if (valueFromRow != null) {
+                        // Specific handling for AVG if it's a map like {sum: S, count: C} in the row
+                        // (QueryExecutor.computeAggregate for AVG returns a Map)
+                        if (function == AggregateFunction.AVG && valueFromRow instanceof Map) {
+                            newRow.put(aggAlias, valueFromRow); // Store the whole map {sum=S, count=C}
+                        } else if (valueFromRow instanceof Number) {
+                             newRow.put(aggAlias, valueFromRow); // Handles COUNT, SUM, MIN, MAX if they are numbers
+                        } else {
+                             // If not a number and not an AVG map, store as is or log a warning
+                             logger.warn("Unexpected data type for aggregate alias {} in row {}: {}. Storing as is.", aggAlias, row, valueFromRow.getClass().getName());
+                             newRow.put(aggAlias, valueFromRow); 
                         }
-                        
-                        // Si toujours pas de valeur, recherche dans toutes les clés disponibles
-                        if (value == null) {
-                            // Recherche dans toutes les clés de la ligne
-                            for (String key : row.keySet()) {
-                                if (key.toLowerCase().contains(actualColName.toLowerCase())) {
-                                    value = row.get(key);
-                                    logger.info("Trouvé valeur en utilisant une correspondance partielle: {}={}", key, value);
-                                    break;
-                                }
-                            }
-                            
-                            // Si encore null, on fait une dernière tentative avec la colonne brute
-                            if (value == null) {
-                                value = row.get(actualColName);
-                                if (value != null) {
-                                    logger.info("Trouvé valeur en utilisant le nom de colonne brut: {}", value);
-                                }
-                            }
-                            
-                            // Si toujours null, utilise une valeur par défaut
-                            if (value == null) {
-                                // Initialise avec des valeurs par défaut appropriées si la colonne est absente
-                                switch (function) {
-                                    case COUNT:
-                                        value = 1L; // Pour COUNT on commence à 1 pour la première ligne
-                                        break;
-                                    case SUM:
-                                        value = 0.0;
-                                        break;
-                                    case AVG:
-                                        value = 0.0;
-                                        break;
-                                    case MIN:
-                                        value = Double.MAX_VALUE; // Valeur élevée pour MIN
-                                        break;
-                                    case MAX:
-                                        value = Double.MIN_VALUE; // Valeur basse pour MAX
-                                        break;
-                                }
-                                logger.info("Valeur par défaut initialisée pour {} avec la fonction {}: {}", colName, function, value);
-                            }
-                        }
-                        
-                        // Stocke la valeur initiale
-                        resultCol = colName;
-                        newRow.put(resultCol, value);
-                        
-                        // Pour AVG, stocke aussi le compteur
-                        if (function == AggregateFunction.AVG) {
-                            newRow.put("__count_" + colName, 1L);
+                    } else {
+                        // If aggregate is missing from input 'row', initialize to a sensible default
+                        logger.warn("Aggregate value for alias {} missing in input row {}. Initializing to default.", aggAlias, row);
+                        switch (function) {
+                            case COUNT:
+                                newRow.put(aggAlias, 0L);
+                                break;
+                            case SUM:
+                                newRow.put(aggAlias, 0.0D); // Assuming double for sum, adjust if Long based on column type
+                                break;
+                            case AVG:
+                                Map<String, Object> initialAvg = new HashMap<>();
+                                initialAvg.put("sum", 0.0D);
+                                initialAvg.put("count", 0L);
+                                newRow.put(aggAlias, initialAvg);
+                                break;
+                            case MIN:
+                                newRow.put(aggAlias, null); // Or specific type's MAX_VALUE
+                                break;
+                            case MAX:
+                                newRow.put(aggAlias, null); // Or specific type's MIN_VALUE
+                                break;
+                            default:
+                                newRow.put(aggAlias, null);
                         }
                     }
                 }
@@ -489,15 +430,49 @@ public class ClusterManager {
                     AggregateFunction function = entry.getValue();
                     String resultCol;
                     
-                    // Détermine la colonne résultat selon la fonction
-                    if (function == AggregateFunction.COUNT) {
-                        resultCol = colName;
-                        // Incrémente le compteur
-                        Object existingValue = existingRow.get(resultCol);
-                        if (existingValue instanceof Number) {
-                            existingRow.put(resultCol, ((Number) existingValue).longValue() + 1);
+                // Modifiez la section qui traite COUNT pour afficher le contenu complet de la ligne
+                if (function == AggregateFunction.COUNT) {
+                    resultCol = colName;
+                    
+                    // Afficher le contenu complet de la ligne pour déboguer
+                    logger.info("Contenu complet de la ligne pour clé {}: {}", groupKey, row);
+                    
+                    Object existingValObj = existingRow.get(resultCol);
+                    Object incomingValObj = null;
+
+                    // Attempt to find the incoming count value using common names/aliases.
+                    // 'colName' here is the alias for the COUNT aggregate (e.g., "count").
+                    String[] possibleIncomingNames = { colName, "count" }; // Prioritize the alias, then generic "count"
+
+                    for (String name : possibleIncomingNames) {
+                        if (row.containsKey(name)) {
+                            incomingValObj = row.get(name);
+                            logger.debug("COUNT: Found incoming value for groupKey '{}', aggCol '{}', using name '{}': {}", groupKey, colName, name, incomingValObj);
+                            break;
                         }
-                    } else {
+                    }
+                    if (incomingValObj == null) {
+                        logger.warn("COUNT: Incoming value for groupKey '{}', aggCol '{}' not found in row keys {}. Assuming 0 for this node's contribution.", groupKey, colName, row.keySet());
+                    }
+
+                    long currentCount = 0L;
+                    if (existingValObj instanceof Number) {
+                        currentCount = ((Number) existingValObj).longValue();
+                    } else if (existingValObj != null) {
+                        // This case implies the existing stored value was not a number, which is unexpected for COUNT.
+                        logger.warn("COUNT: Existing value for groupKey '{}', aggCol '{}' in existingRow is not a Number: {}. Using 0 for current count.", groupKey, colName, existingValObj);
+                    } // If existingValObj is null (e.g. first merge into a default-initialized row), currentCount remains 0.
+
+                    long countToAdd = 0L;
+                    if (incomingValObj instanceof Number) {
+                        countToAdd = ((Number) incomingValObj).longValue();
+                    } else if (incomingValObj != null) {
+                        logger.warn("COUNT: Incoming value for groupKey '{}', aggCol '{}' from current row is not a Number: {}. Adding 0.", groupKey, colName, incomingValObj);
+                    } // If incomingValObj is null (already warned or logged), countToAdd remains 0.
+                    
+                    existingRow.put(resultCol, currentCount + countToAdd);
+                    logger.info("COUNT: Merged counts for groupKey '{}', aggCol '{}': Current={}, Incoming={}, Result={}", groupKey, colName, currentCount, countToAdd, existingRow.get(resultCol));
+                } else {
                         resultCol = colName;
                         // Récupère la valeur existante
                         Object existingValue = existingRow.get(resultCol);
@@ -565,19 +540,57 @@ public class ClusterManager {
                                 // Déjà traité en dehors du switch
                                 break;
                             case SUM:
-                                // Additionne les valeurs
                                 if (existingValue instanceof Number && newValue instanceof Number) {
-                                    double sum = ((Number) existingValue).doubleValue() + ((Number) newValue).doubleValue();
+                                    Number sum;
+                                    if (existingValue instanceof Double || newValue instanceof Double) {
+                                        sum = ((Number) existingValue).doubleValue() + ((Number) newValue).doubleValue();
+                                    } else if (existingValue instanceof Float || newValue instanceof Float) {
+                                        sum = ((Number) existingValue).floatValue() + ((Number) newValue).floatValue();
+                                    } else if (existingValue instanceof Long || newValue instanceof Long) {
+                                        sum = ((Number) existingValue).longValue() + ((Number) newValue).longValue();
+                                    } else { // Integer, Short, Byte default to int sum
+                                        sum = ((Number) existingValue).intValue() + ((Number) newValue).intValue();
+                                    }
                                     existingRow.put(resultCol, sum);
+                                } else if (newValue instanceof Number && existingValue == null) { // If existing is null (e.g. first sum for a group after init)
+                                     existingRow.put(resultCol, newValue);
+                                } else if (newValue instanceof Number) { // If existing is not a number but new is, prefer new.
+                                    logger.warn("SUM merge: existingValue for groupKey {} was not a number. Overwriting with newValue. existing: {}, new: {}", groupKey, existingValue, newValue);
+                                    existingRow.put(resultCol, newValue);
+                                } else {
+                                    logger.warn("SUM merge: Values are not suitable for summation for groupKey {}. existing: {}, new: {}. Skipping update.", groupKey, existingValue, newValue);
                                 }
                                 break;
                             case AVG:
-                                // Accumule la somme et le compteur pour calculer la moyenne à la fin
-                                if (existingValue instanceof Number && newValue instanceof Number) {
-                                    double sum = ((Number) existingValue).doubleValue() + ((Number) newValue).doubleValue();
-                                    long count = ((Number) existingRow.get("__count_" + colName)).longValue() + 1;
-                                    existingRow.put(resultCol, sum);
-                                    existingRow.put("__count_" + colName, count);
+                                if (existingValue instanceof Map && newValue instanceof Map) {
+                                    @SuppressWarnings("unchecked")
+                                    Map<String, Object> existingAvgComponents = (Map<String, Object>) existingValue;
+                                    @SuppressWarnings("unchecked")
+                                    Map<String, Object> incomingAvgComponents = (Map<String, Object>) newValue;
+
+                                    Object existingSumObj = existingAvgComponents.get("sum");
+                                    Object existingCountObj = existingAvgComponents.get("count");
+                                    Object incomingSumObj = incomingAvgComponents.get("sum");
+                                    Object incomingCountObj = incomingAvgComponents.get("count");
+
+                                    if (existingSumObj instanceof Number && existingCountObj instanceof Number &&
+                                        incomingSumObj instanceof Number && incomingCountObj instanceof Number) {
+
+                                        double totalSum = ((Number) existingSumObj).doubleValue() + ((Number) incomingSumObj).doubleValue();
+                                        long totalCount = ((Number) existingCountObj).longValue() + ((Number) incomingCountObj).longValue();
+
+                                        Map<String, Object> newAvgComponents = new HashMap<>();
+                                        newAvgComponents.put("sum", totalSum);
+                                        newAvgComponents.put("count", totalCount);
+                                        existingRow.put(resultCol, newAvgComponents); // resultCol is aggAlias
+                                    } else {
+                                        logger.warn("AVG merge: One or more sum/count components are not numbers for groupKey {}. existing: {}, incoming: {}. Skipping update.", groupKey, existingAvgComponents, incomingAvgComponents);
+                                    }
+                                } else {
+                                     logger.warn("AVG merge: existingValue or newValue is not a Map for groupKey {}. existing type: {}, new type: {}. Skipping update.",
+                                        groupKey,
+                                        existingValue != null ? existingValue.getClass().getName() : "null",
+                                        newValue != null ? newValue.getClass().getName() : "null");
                                 }
                                 break;
                             case MIN:
