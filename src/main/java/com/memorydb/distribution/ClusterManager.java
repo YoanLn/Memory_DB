@@ -5,6 +5,7 @@ import com.memorydb.core.DatabaseContext;
 import com.memorydb.core.Table;
 import com.memorydb.query.AggregateFunction;
 import com.memorydb.query.Query;
+import com.memorydb.query.AggregateDefinition;
 import com.memorydb.query.QueryExecutor;
 import com.memorydb.query.QueryResult;
 import org.slf4j.Logger;
@@ -266,8 +267,7 @@ public class ClusterManager {
      */
     private void processGroupedResults(List<Map<String, Object>> results, Query query, Map<String, Map<String, Object>> groupedResults) {
         List<String> groupByColumns = query.getGroupByColumns();
-        Map<String, AggregateFunction> aggregateFunctions = query.getAggregateFunctions();
-        Map<String, Map<String, Object>> mergedGroups = new HashMap<>();
+        Map<String, AggregateDefinition> aggregateFunctions = query.getAggregateFunctions();
 
         // Log pour le débogage
         logger.info("Traitement de {} lignes avec {} colonnes GROUP BY et {} fonctions d'agrégation", 
@@ -289,7 +289,7 @@ public class ClusterManager {
         // Pour traquer les colonnes avec préfixe et leur colonne d'origine
         Map<String, String> prefixedToOriginalColumnMap = new HashMap<>();
         for (String colName : aggregateFunctions.keySet()) {
-            AggregateFunction func = aggregateFunctions.get(colName);
+            AggregateFunction func = aggregateFunctions.get(colName).getFunction();
             // Génère les noms de colonnes préfixés pour chaque fonction d'agrégation
             switch (func) {
                 case SUM:
@@ -355,9 +355,9 @@ public class ClusterManager {
                     newRow.put(groupCol, row.get(groupCol));
                 }
                 // Initialize aggregates in newRow directly from the current 'row'
-                for (Map.Entry<String, AggregateFunction> entry : aggregateFunctions.entrySet()) {
+                for (Map.Entry<String, AggregateDefinition> entry : aggregateFunctions.entrySet()) {
                     String aggAlias = entry.getKey(); // e.g., "count", "sum_value"
-                    AggregateFunction function = entry.getValue();
+                    AggregateFunction function = entry.getValue().getFunction();
                     Object valueFromRow = null;
 
                     // Attempt to get the value using the alias or common names
@@ -425,9 +425,9 @@ public class ClusterManager {
             } else {
                 // Met à jour les valeurs agrégées pour cette clé
                 Map<String, Object> existingRow = groupedResults.get(groupKey);
-                for (Map.Entry<String, AggregateFunction> entry : aggregateFunctions.entrySet()) {
+                for (Map.Entry<String, AggregateDefinition> entry : aggregateFunctions.entrySet()) {
                     String colName = entry.getKey();
-                    AggregateFunction function = entry.getValue();
+                    AggregateFunction function = entry.getValue().getFunction();
                     String resultCol;
                     
                 // Modifiez la section qui traite COUNT pour afficher le contenu complet de la ligne
@@ -624,9 +624,9 @@ public class ClusterManager {
         
         // Finalise les calculs et nettoie les champs temporaires
         for (Map<String, Object> row : groupedResults.values()) {
-            for (Map.Entry<String, AggregateFunction> entry : aggregateFunctions.entrySet()) {
+            for (Map.Entry<String, AggregateDefinition> entry : aggregateFunctions.entrySet()) {
                 String colName = entry.getKey();
-                AggregateFunction function = entry.getValue();
+                AggregateFunction function = entry.getValue().getFunction();
                 
                 if (function == AggregateFunction.AVG) {
                     Object sum = row.get(colName);

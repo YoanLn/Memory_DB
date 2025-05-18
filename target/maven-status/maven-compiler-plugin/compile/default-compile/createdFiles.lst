@@ -14,6 +14,7 @@ com/memorydb/rest/dto/QueryDto.class
 com/memorydb/core/Table.class
 com/memorydb/rest/DistributedParquetUploadForm.class
 com/memorydb/distribution/NodeInfo.class
+com/memorydb/query/AggregateDefinition.class
 com/memorydb/rest/dto/ColumnDto.class
 com/memorydb/util/DirectBufferIO.class
 com/memorydb/rest/FileResource.class

@@ -237,7 +237,7 @@ public class QueryExecutor {
         List<String> selectColumns, 
         Map<GroupKey, List<Integer>> groupedRows,
         List<String> groupByColumns, 
-        Map<String, AggregateFunction> queryAggregateFunctions) {
+        Map<String, AggregateDefinition> queryAggregateFunctions) {
         
         List<String> finalResultColumnNames = new ArrayList<>();
         List<Map<String, Object>> resultRowMaps = new ArrayList<>();
@@ -272,21 +272,29 @@ public class QueryExecutor {
 
             // B. Compute and add aggregate function values to the current row map
             if (queryAggregateFunctions != null) {
-                for (Map.Entry<String, AggregateFunction> aggDefEntry : queryAggregateFunctions.entrySet()) {
-                    String alias = aggDefEntry.getKey(); 
-                    AggregateFunction aggFunc = aggDefEntry.getValue();
-                    
-                    ColumnStore targetColumnStoreForAgg = null; 
-                    
-                    // For non-COUNT aggregates, we would ideally resolve the target column here.
-                    // The Query object or another mechanism should provide alias -> target_column_for_aggregation.
-                    // Current `computeAggregate` handles null ColumnStore by returning null or throwing if it's strictly needed.
-                    // For non-COUNT aggregates, if targetColumnStoreForAgg remains null, computeAggregate will throw an
-                    // IllegalArgumentException if the function requires a non-null ColumnStore, which is the correct behavior for now.
-                    // If aggFunc is COUNT, a null targetColumnStoreForAgg is acceptable for computeAggregate.
-                    
+                for (Map.Entry<String, AggregateDefinition> aggDefEntry : queryAggregateFunctions.entrySet()) {
+                    String alias = aggDefEntry.getKey();
+                    AggregateDefinition aggDef = aggDefEntry.getValue();
+                    AggregateFunction aggFunc = aggDef.getFunction();
+                    String targetColumnName = aggDef.getTargetColumn();
+
+                    ColumnStore targetColumnStoreForAgg = null;
+                    if (targetColumnName != null && !targetColumnName.equals("*")) {
+                        targetColumnStoreForAgg = tableData.getColumnStore(targetColumnName);
+                        // Ensure the column exists for non-COUNT aggregates if a specific column is targeted.
+                        if (targetColumnStoreForAgg == null && aggFunc != AggregateFunction.COUNT) {
+                            String tableName = tableData.getTable() != null && tableData.getTable().getName() != null ? tableData.getTable().getName() : "[unknown_table]";
+                            throw new IllegalArgumentException(
+                                String.format("Target column '%s' not found in table '%s' for aggregate function %s with alias '%s'.",
+                                              targetColumnName, tableName, aggFunc, alias)
+                            );
+                        }
+                    }
+                    // For COUNT(*), targetColumnStoreForAgg will remain null, which is handled by computeAggregate.
+                    // For other aggregates, targetColumnStoreForAgg must be valid if a column is specified.
+
                     Object aggregateValue = computeAggregate(aggFunc, targetColumnStoreForAgg, rowsInGroup);
-                    currentRowMap.put(alias, aggregateValue); 
+                    currentRowMap.put(alias, aggregateValue);
                 }
             }
             resultRowMaps.add(currentRowMap);

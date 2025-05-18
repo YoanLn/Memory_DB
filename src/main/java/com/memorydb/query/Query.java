@@ -13,7 +13,7 @@ public class Query {
     private final List<String> selectColumns;
     private final List<Condition> conditions;
     private final List<String> groupByColumns;
-    private final Map<String, AggregateFunction> aggregateFunctions;
+    private final Map<String, AggregateDefinition> aggregateFunctions;
     // Old single column order by (for backwards compatibility)
     private String orderBy;
     private boolean orderByAscending;
@@ -31,7 +31,7 @@ public class Query {
         this.selectColumns = new ArrayList<>();
         this.conditions = new ArrayList<>();
         this.groupByColumns = new ArrayList<>();
-        this.aggregateFunctions = new HashMap<>();
+        this.aggregateFunctions = new HashMap<String, AggregateDefinition>();
         this.orderBy = null;
         this.orderByAscending = true;
         this.orderByColumns = new ArrayList<>();
@@ -77,14 +77,80 @@ public class Query {
     }
     
     /**
-     * Ajoute une fonction d'agrégation
-     * @param columnName Le nom de la colonne
-     * @param function La fonction d'agrégation
-     * @return Cette requête
+     * Ajoute une fonction d'agrégation.
+     * L'alias est utilisé comme clé et doit permettre d'inférer la colonne cible.
+     * Ex: "SUM_fare_amount" où "SUM" est la fonction et "fare_amount" la colonne cible.
+     * Pour COUNT(*), utiliser l'alias "COUNT_STAR".
+     *
+     * @param alias    L'alias pour la fonction d'agrégation (ex: "SUM_fare_amount").
+     * @param function Le type de fonction d'agrégation (ex: AggregateFunction.SUM).
+     * @return Cette requête.
+     * @throws IllegalArgumentException si la colonne cible ne peut pas être inférée de l'alias,
+     *                                ou si l'alias ou la fonction est null.
      */
-    public Query aggregate(String columnName, AggregateFunction function) {
-        aggregateFunctions.put(columnName, function);
+    public Query aggregate(String alias, AggregateFunction function) {
+        String targetColumn = inferTargetColumn(alias, function);
+        AggregateDefinition aggDef = new AggregateDefinition(alias, function, targetColumn);
+        aggregateFunctions.put(alias, aggDef);
         return this;
+    }
+
+    /**
+     * Infère la colonne cible à partir de l'alias de l'agrégation et de la fonction.
+     * Attend un alias au format "NOMFONCTION_NOMCOLONNE" (ex: "SUM_fare_amount")
+     * ou "COUNT_STAR" pour COUNT(*).
+     *
+     * @param alias    L'alias de l'agrégation.
+     * @param function Le type de fonction d'agrégation.
+     * @return Le nom de la colonne cible.
+     * @throws IllegalArgumentException si la colonne cible ne peut pas être inférée,
+     *                                ou si l'alias ou la fonction est null/vide.
+     */
+    private String inferTargetColumn(String alias, AggregateFunction function) {
+        if (alias == null || alias.isEmpty()) {
+            throw new IllegalArgumentException("Alias cannot be null or empty.");
+        }
+        if (function == null) {
+            throw new IllegalArgumentException("AggregateFunction cannot be null.");
+        }
+
+        // Handle COUNT(*) specifically. Assume alias "COUNT_STAR" is used.
+        if (alias.equalsIgnoreCase("COUNT_STAR")) {
+            return "*";
+        }
+
+        // Handle simple "count" alias for COUNT(*)
+        if (function == AggregateFunction.COUNT && alias.equalsIgnoreCase("count")) {
+            return "*";
+        }
+
+        String functionNameInAliasPrefix;
+        String inferredTargetColumn;
+
+        int firstUnderscoreIndex = alias.indexOf('_');
+
+        if (firstUnderscoreIndex > 0 && firstUnderscoreIndex < alias.length() - 1) {
+            functionNameInAliasPrefix = alias.substring(0, firstUnderscoreIndex);
+            inferredTargetColumn = alias.substring(firstUnderscoreIndex + 1);
+
+            if (functionNameInAliasPrefix.equalsIgnoreCase(function.name())) {
+                if (inferredTargetColumn.isEmpty()) {
+                     throw new IllegalArgumentException(
+                        String.format("Inferred target column is empty for alias '%s'. Expected format like 'FUNCTION_COLUMNNAME'.", alias)
+                    );
+                }
+                return inferredTargetColumn;
+            } else {
+                throw new IllegalArgumentException(
+                    String.format("Aggregate function name prefix in alias ('%s') does not match the provided function type ('%s') for alias '%s'. Expected format 'FUNCTION_COLUMNNAME'.",
+                                  functionNameInAliasPrefix, function.name(), alias)
+                );
+            }
+        }
+
+        throw new IllegalArgumentException(
+            String.format("Cannot infer target column from alias '%s'. Expected format 'FUNCTION_COLUMNNAME' (e.g., 'SUM_fare_amount') or 'COUNT_STAR'.", alias)
+        );
     }
     
     /**
@@ -190,11 +256,13 @@ public class Query {
     }
     
     /**
-     * Obtient les fonctions d'agrégation
-     * @return Les fonctions d'agrégation
+     * Obtient les définitions des fonctions d'agrégation.
+     * La clé de la map est l'alias de l'agrégation.
+     *
+     * @return Une map des alias vers leurs AggregateDefinition.
      */
-    public Map<String, AggregateFunction> getAggregateFunctions() {
-        return new HashMap<>(aggregateFunctions);
+    public Map<String, AggregateDefinition> getAggregateFunctions() {
+        return new HashMap<String, AggregateDefinition>(aggregateFunctions);
     }
     
     /**
