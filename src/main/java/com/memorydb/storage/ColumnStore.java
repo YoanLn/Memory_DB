@@ -339,20 +339,52 @@ public class ColumnStore {
      * @return La valeur de date (millisecondes depuis l'epoch)
      */
     public long getDate(int index) {
-        if (index >= size) {
+        if (index < 0 || index >= size) {
             throw new IndexOutOfBoundsException("Index: " + index + ", Size: " + size);
         }
         if (nullFlags != null && nullFlags[index]) {
-            throw new NullPointerException("La valeur à l'index " + index + " est null");
+            throw new IllegalStateException("Value at index " + index + " is null. Check with isNull() first.");
         }
         return dateValues[index];
     }
-    
+
     /**
-     * Vérifie si une valeur est null
+     * Obtient la valeur à l'index spécifié en tant qu'Object.
+     * Vérifie d'abord si la valeur est null.
      * @param index L'index de la valeur
-     * @return true si la valeur est null, false sinon
+     * @return La valeur en tant qu'Object, ou null si la valeur est SQL NULL.
      */
+    public Object getValue(int index) {
+        if (index < 0 || index >= size) {
+            throw new IndexOutOfBoundsException("Index: " + index + ", Size: " + size);
+        }
+        if (isNull(index)) {
+            return null;
+        }
+
+        switch (type) {
+            case INTEGER:
+                return getInt(index);
+            case LONG:
+                return getLong(index);
+            case FLOAT:
+                return getFloat(index);
+            case DOUBLE:
+                return getDouble(index);
+            case BOOLEAN:
+                return getBoolean(index);
+            case STRING:
+                return getString(index);
+            case DATE:
+            case TIMESTAMP: // Timestamps are often stored as long (epoch millis)
+                return getDate(index); // Assumes getDate returns long for both DATE and TIMESTAMP
+            default:
+                // If other types like DECIMAL are added to DataType enum and have specific storage,
+                // they should be handled here.
+                throw new UnsupportedOperationException("Unsupported data type for getValue: " + type);
+        }
+    }
+
     public boolean isNull(int index) {
         if (index >= size) {
             throw new IndexOutOfBoundsException("Index: " + index + ", Size: " + size);

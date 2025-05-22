@@ -93,6 +93,48 @@ public class QueryResource {
                 logger.info("Utilisation de QueryExecutor pour la requête avec GROUP BY ou agrégation");
                 QueryResult result = queryExecutor.executeQuery(query);
                 List<Map<String, Object>> resultList = result.getRows();
+
+                // Finalize AVG calculations from Map{sum, count} to Double for local query results
+                // ONLY if it's NOT a forwarded query. Forwarded queries should return the map for the coordinator to finalize.
+                if (!queryDto.isForwardedQuery() && query != null && query.getAggregateFunctions() != null && !query.getAggregateFunctions().isEmpty()) {
+                    logger.info("Finalizing AVG for non-forwarded query in QueryResource.");
+                    for (Map<String, Object> row : resultList) {
+                        for (Map.Entry<String, com.memorydb.query.AggregateDefinition> entry : query.getAggregateFunctions().entrySet()) {
+                            String aggAlias = entry.getKey();
+                            com.memorydb.query.AggregateDefinition aggDef = entry.getValue();
+
+                            if (aggDef.getFunction() == com.memorydb.query.AggregateFunction.AVG) {
+                                Object value = row.get(aggAlias);
+                                if (value instanceof Map) {
+                                    @SuppressWarnings("unchecked")
+                                    Map<String, Object> avgMap = (Map<String, Object>) value;
+                                    Object sumObj = avgMap.get("sum");
+                                    Object countObj = avgMap.get("count");
+
+                                    if (sumObj instanceof Number && countObj instanceof Number) {
+                                        double sum = ((Number) sumObj).doubleValue();
+                                        long count = ((Number) countObj).longValue();
+                                        if (count > 0) {
+                                            row.put(aggAlias, sum / count);
+                                            logger.debug("Finalized AVG for alias '{}' in QueryResource (non-forwarded): {} / {} = {}", aggAlias, sum, count, sum / count);
+                                        } else {
+                                            row.put(aggAlias, null); 
+                                            logger.debug("Finalized AVG for alias '{}' in QueryResource (non-forwarded): count is 0, result set to null", aggAlias);
+                                        }
+                                    } else {
+                                        logger.warn("AVG finalization in QueryResource (non-forwarded): sum or count not Numbers in map for alias {}. Map: {}. Setting to null.", aggAlias, avgMap);
+                                        row.put(aggAlias, null); 
+                                    }
+                                } else if (value != null && !(value instanceof Double)) { // If it's already a double, it's fine (e.g. non-aggregate query that somehow had this alias)
+                                    logger.warn("AVG finalization in QueryResource (non-forwarded): Expected Map for alias {}, but got {}. Value: {}. Setting to null as it's not a Double.", aggAlias, value.getClass().getName(), value);
+                                    row.put(aggAlias, null);
+                                }
+                            }
+                        }
+                    }
+                } else if (queryDto.isForwardedQuery() && query != null && query.getAggregateFunctions() != null && !query.getAggregateFunctions().isEmpty()) {
+                     logger.info("Skipping AVG finalization for forwarded query in QueryResource, returning maps as-is from QueryExecutor.");
+                }
                 return Response.ok(resultList).build();
             }
             

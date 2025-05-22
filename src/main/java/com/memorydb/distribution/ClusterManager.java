@@ -256,7 +256,50 @@ public class ClusterManager {
             finalResults = finalResults.subList(0, query.getLimit());
         }
         
-        return finalResults;
+        // Finalise AVG calculations from Map{sum, count} to Double
+    if (!query.getAggregateFunctions().isEmpty()) { // Check if there are aggregates to avoid unnecessary iteration
+        for (Map<String, Object> row : finalResults) {
+            for (Map.Entry<String, AggregateDefinition> entry : query.getAggregateFunctions().entrySet()) {
+                String aggAlias = entry.getKey();
+                AggregateFunction function = entry.getValue().getFunction();
+
+                if (function == AggregateFunction.AVG) {
+                    Object avgDataObj = row.get(aggAlias);
+                    if (avgDataObj instanceof Map) {
+                        @SuppressWarnings("unchecked")
+                        Map<String, Object> avgDataMap = (Map<String, Object>) avgDataObj;
+                        // logger.info("[ClusterManager Finalize AVG] For alias '{}', using map: {}", aggAlias, avgDataMap);
+                        Object sumValObj = avgDataMap.get("sum");
+                        Object countValObj = avgDataMap.get("count");
+
+                        if (sumValObj instanceof Number && countValObj instanceof Number) {
+                            double sumVal = ((Number) sumValObj).doubleValue();
+                            long countVal = ((Number) countValObj).longValue();
+
+                            if (countVal > 0) {
+                                double avg = sumVal / countVal;
+                                row.put(aggAlias, avg);
+                            } else {
+                                row.put(aggAlias, null); // SQL AVG of empty set is NULL
+                            }
+                        } else {
+                            logger.warn("Finalize AVG: Map for '{}' had non-numeric or missing sum/count: {}. Setting to null.", aggAlias, avgDataMap);
+                            row.put(aggAlias, null); // Fallback to NULL
+                        }
+                    } else if (avgDataObj != null && !(avgDataObj instanceof Number)) {
+                        logger.warn("Finalize AVG: Unexpected data type for '{}': {}. Expected Map or Number. Setting to null.", aggAlias, avgDataObj.getClass().getName());
+                        row.put(aggAlias, null); // Fallback to NULL
+                    }
+                }
+            }
+        }
+    }
+    // Supprime tous les champs temporaires commençant par __ from final results if any survived
+    for (Map<String, Object> row : finalResults) {
+        row.entrySet().removeIf(entry -> entry.getKey().startsWith("__"));
+    }
+
+    return finalResults;
     }
     
     /**
@@ -472,149 +515,131 @@ public class ClusterManager {
                     
                     existingRow.put(resultCol, currentCount + countToAdd);
                     logger.info("COUNT: Merged counts for groupKey '{}', aggCol '{}': Current={}, Incoming={}, Result={}", groupKey, colName, currentCount, countToAdd, existingRow.get(resultCol));
-                } else {
-                        resultCol = colName;
-                        // Récupère la valeur existante
-                        Object existingValue = existingRow.get(resultCol);
-                        
-                        // Get the value to aggregate - vérifie d'abord la colonne directement
-                        Object newValue = row.get(colName);
-                        logger.info("Tentative d'accès à la colonne {}, valeur trouvée: {}", colName, newValue);
-                        
-                        // Si aucune valeur n'est trouvée avec le nom de colonne tel quel, extrait le nom de colonne réel (sans préfixe de fonction)
-                        String actualColName = colName;
-                        if (newValue == null && colName.contains("_")) {
-                            String[] parts = colName.split("_", 2);
-                            if (parts.length > 1 && (parts[0].equals("sum") || parts[0].equals("avg") || 
-                                                    parts[0].equals("min") || parts[0].equals("max"))) {
-                                actualColName = parts[1];
-                                newValue = row.get(actualColName);
-                                logger.info("Tentative d'accès avec le nom de colonne extrait {}, valeur trouvée: {}", actualColName, newValue);
-                            }
-                        }
-                        
-                        // If no value found with the original name, try with the actual column name
-                        if (newValue == null && !actualColName.equals(colName)) {
-                            newValue = row.get(actualColName);
-                            if (newValue != null) {
-                                logger.info("Found update value using extracted column name {}: {}", actualColName, newValue);
-                            }
-                        }
-                        
-                        // As a fallback, try with various prefixed names
-                        if (newValue == null) {
-                            String prefixedName = null;
-                            switch (function) {
-                                case SUM:
-                                    prefixedName = "sum_" + actualColName;
-                                    break;
-                                case AVG:
-                                    prefixedName = "avg_" + actualColName;
-                                    break;
-                                case MIN:
-                                    prefixedName = "min_" + actualColName;
-                                    break;
-                                case MAX:
-                                    prefixedName = "max_" + actualColName;
-                                    break;
-                                case COUNT:
-                                    // Count typically uses the original name
-                                    prefixedName = "count";
-                                    break;
-                            }
-                            
-                            if (prefixedName != null && row.containsKey(prefixedName)) {
-                                newValue = row.get(prefixedName);
-                                logger.info("Utilisation de la valeur préfixée pour mise à jour: {} = {}", prefixedName, newValue);
-                            }
-                        }
-                        
-                        // Skip null values for calculations
-                        if (newValue == null) {
-                            continue;
-                        }
-                        
-                        // Mise à jour selon la fonction d'agrégation
-                        switch (function) {
-                            case COUNT:
-                                // Déjà traité en dehors du switch
-                                break;
-                            case SUM:
-                                if (existingValue instanceof Number && newValue instanceof Number) {
-                                    Number sum;
-                                    if (existingValue instanceof Double || newValue instanceof Double) {
-                                        sum = ((Number) existingValue).doubleValue() + ((Number) newValue).doubleValue();
-                                    } else if (existingValue instanceof Float || newValue instanceof Float) {
-                                        sum = ((Number) existingValue).floatValue() + ((Number) newValue).floatValue();
-                                    } else if (existingValue instanceof Long || newValue instanceof Long) {
-                                        sum = ((Number) existingValue).longValue() + ((Number) newValue).longValue();
-                                    } else { // Integer, Short, Byte default to int sum
-                                        sum = ((Number) existingValue).intValue() + ((Number) newValue).intValue();
-                                    }
-                                    existingRow.put(resultCol, sum);
-                                } else if (newValue instanceof Number && existingValue == null) { // If existing is null (e.g. first sum for a group after init)
-                                     existingRow.put(resultCol, newValue);
-                                } else if (newValue instanceof Number) { // If existing is not a number but new is, prefer new.
-                                    logger.warn("SUM merge: existingValue for groupKey {} was not a number. Overwriting with newValue. existing: {}, new: {}", groupKey, existingValue, newValue);
-                                    existingRow.put(resultCol, newValue);
-                                } else {
-                                    logger.warn("SUM merge: Values are not suitable for summation for groupKey {}. existing: {}, new: {}. Skipping update.", groupKey, existingValue, newValue);
-                                }
-                                break;
-                            case AVG:
-                                if (existingValue instanceof Map && newValue instanceof Map) {
-                                    @SuppressWarnings("unchecked")
-                                    Map<String, Object> existingAvgComponents = (Map<String, Object>) existingValue;
-                                    @SuppressWarnings("unchecked")
-                                    Map<String, Object> incomingAvgComponents = (Map<String, Object>) newValue;
+                } else { // Handle SUM, AVG, MIN, MAX
+                    String aggAlias = colName; // colName is the alias like "avg_price"
+                    Object existingValue = existingRow.get(aggAlias);
+                    Object newValue = row.get(aggAlias); // Directly use the alias to get the incoming value
 
-                                    Object existingSumObj = existingAvgComponents.get("sum");
-                                    Object existingCountObj = existingAvgComponents.get("count");
-                                    Object incomingSumObj = incomingAvgComponents.get("sum");
-                                    Object incomingCountObj = incomingAvgComponents.get("count");
-
-                                    if (existingSumObj instanceof Number && existingCountObj instanceof Number &&
-                                        incomingSumObj instanceof Number && incomingCountObj instanceof Number) {
-
-                                        double totalSum = ((Number) existingSumObj).doubleValue() + ((Number) incomingSumObj).doubleValue();
-                                        long totalCount = ((Number) existingCountObj).longValue() + ((Number) incomingCountObj).longValue();
-
-                                        Map<String, Object> newAvgComponents = new HashMap<>();
-                                        newAvgComponents.put("sum", totalSum);
-                                        newAvgComponents.put("count", totalCount);
-                                        existingRow.put(resultCol, newAvgComponents); // resultCol is aggAlias
-                                    } else {
-                                        logger.warn("AVG merge: One or more sum/count components are not numbers for groupKey {}. existing: {}, incoming: {}. Skipping update.", groupKey, existingAvgComponents, incomingAvgComponents);
-                                    }
-                                } else {
-                                     logger.warn("AVG merge: existingValue or newValue is not a Map for groupKey {}. existing type: {}, new type: {}. Skipping update.",
-                                        groupKey,
-                                        existingValue != null ? existingValue.getClass().getName() : "null",
-                                        newValue != null ? newValue.getClass().getName() : "null");
-                                }
-                                break;
-                            case MIN:
-                                // Conserve la valeur minimale
-                                if (existingValue instanceof Comparable && newValue instanceof Comparable) {
-                                    @SuppressWarnings("unchecked")
-                                    Comparable<Object> compExisting = (Comparable<Object>) existingValue;
-                                    if (compExisting.compareTo(newValue) > 0) {
-                                        existingRow.put(resultCol, newValue);
-                                    }
-                                }
-                                break;
-                            case MAX:
-                                // Conserve la valeur maximale
-                                if (existingValue instanceof Comparable && newValue instanceof Comparable) {
-                                    @SuppressWarnings("unchecked")
-                                    Comparable<Object> compExisting = (Comparable<Object>) existingValue;
-                                    if (compExisting.compareTo(newValue) < 0) {
-                                        existingRow.put(resultCol, newValue);
-                                    }
-                                }
-                                break;
-                        }
+                    if (newValue == null) {
+                        logger.debug("MERGE: Null newValue for alias {} in groupKey {}. Skipping.", aggAlias, groupKey);
+                        continue; // Skip if the incoming value for this aggregate is null
                     }
+
+                    // Log the values being processed
+                    logger.info("MERGE: Processing groupKey '{}', aggAlias '{}'. Existing: '{}', New: '{}'", 
+                                groupKey, aggAlias, existingValue, newValue);
+
+                    switch (function) {
+                        case COUNT:
+                            // Already handled
+                            break;
+                        case SUM:
+                            if (existingValue instanceof Number && newValue instanceof Number) {
+                                Number sum;
+                                if (existingValue instanceof Double || newValue instanceof Double) {
+                                    sum = ((Number) existingValue).doubleValue() + ((Number) newValue).doubleValue();
+                                } else if (existingValue instanceof Float || newValue instanceof Float) {
+                                    sum = ((Number) existingValue).floatValue() + ((Number) newValue).floatValue();
+                                } else if (existingValue instanceof Long || newValue instanceof Long) {
+                                    sum = ((Number) existingValue).longValue() + ((Number) newValue).longValue();
+                                } else { // Integer, Short, Byte default to int sum
+                                    sum = ((Number) existingValue).intValue() + ((Number) newValue).intValue();
+                                }
+                                existingRow.put(aggAlias, sum);
+                                logger.debug("MERGE SUM: groupKey '{}', aggAlias '{}', updated sum: {}", groupKey, aggAlias, sum);
+                            } else if (newValue instanceof Number && existingValue == null) {
+                                existingRow.put(aggAlias, newValue);
+                                logger.debug("MERGE SUM: groupKey '{}', aggAlias '{}', initialized sum: {}", groupKey, aggAlias, newValue);
+                            } else if (newValue != null) { // existingValue is not Number or is null, but newValue is present
+                                 logger.warn("MERGE SUM: existingValue for groupKey {}/{} was not a Number or null, while newValue is {}. Overwriting with newValue if it's a Number.", groupKey, aggAlias, newValue.getClass().getName());
+                                 if (newValue instanceof Number) {
+                                    existingRow.put(aggAlias, newValue);
+                                 }
+                            } else {
+                                 logger.warn("MERGE SUM: Values not suitable for summation or newValue is null for groupKey {}/{}. Existing: {}, New: {}. Skipping.", groupKey, aggAlias, existingValue, newValue);
+                            }
+                            break;
+                        case AVG:
+                            if (newValue instanceof Map && existingValue == null) {
+                                existingRow.put(aggAlias, newValue); 
+                                logger.info("MERGE AVG: groupKey '{}', aggAlias '{}', initialized with map: {}", groupKey, aggAlias, newValue);
+                            } else if (existingValue instanceof Map && newValue instanceof Map) {
+                                @SuppressWarnings("unchecked") Map<String, Object> existingAvgMap = (Map<String, Object>) existingValue;
+                                @SuppressWarnings("unchecked") Map<String, Object> newAvgMap = (Map<String, Object>) newValue;
+                                logger.info("MERGE AVG: Found two maps for groupKey '{}', aggAlias '{}'. Existing: {}, New: {}. Attempting to combine.", groupKey, aggAlias, existingAvgMap, newAvgMap);
+
+                                Object existingSumObj = existingAvgMap.get("sum");
+                                Object existingCountObj = existingAvgMap.get("count");
+                                Object newSumObj = newAvgMap.get("sum");
+                                Object newCountObj = newAvgMap.get("count");
+
+                                if (existingSumObj instanceof Number && existingCountObj instanceof Number &&
+                                    newSumObj instanceof Number && newCountObj instanceof Number) {
+
+                                    double combinedSum = ((Number) existingSumObj).doubleValue() + ((Number) newSumObj).doubleValue();
+                                    long combinedCount = ((Number) existingCountObj).longValue() + ((Number) newCountObj).longValue();
+
+                                    Map<String, Object> combinedAvgMap = new HashMap<>();
+                                    combinedAvgMap.put("sum", combinedSum);
+                                    combinedAvgMap.put("count", combinedCount);
+                                    existingRow.put(aggAlias, combinedAvgMap);
+                                    logger.info("MERGE AVG: groupKey '{}', aggAlias '{}', successfully combined map: {}", groupKey, aggAlias, combinedAvgMap);
+                                } else {
+                                     logger.warn("MERGE AVG: Maps for groupKey {}/{} lacked sum/count or were non-numeric. Existing: {}, New: {}. Preferring new map if valid.", groupKey, aggAlias, existingAvgMap, newAvgMap);
+                                     if (newAvgMap.containsKey("sum") && newAvgMap.containsKey("count") && newAvgMap.get("sum") instanceof Number && newAvgMap.get("count") instanceof Number){
+                                         existingRow.put(aggAlias, newAvgMap);
+                                     } 
+                                }
+                            } else if (newValue instanceof Map) { 
+                                 logger.warn("MERGE AVG: existingValue for groupKey {}/{} was not a Map, but newValue is. Overwriting with newValue.", groupKey, aggAlias);
+                                 existingRow.put(aggAlias, newValue);
+                            }
+                             else {
+                                logger.warn("MERGE AVG: Unexpected types or null newValue for groupKey {}/{}. Existing: {}, New: {}. Cannot merge.",
+                                    groupKey, aggAlias,
+                                    existingValue != null ? existingValue.getClass().getName() : "null",
+                                    newValue != null ? newValue.getClass().getName() : "null");
+                            }
+                            break;
+                    case MIN:
+                        if (existingValue instanceof Comparable && newValue instanceof Comparable) {
+                            @SuppressWarnings("unchecked")
+                            Comparable<Object> compExisting = (Comparable<Object>) existingValue;
+                            if (compExisting.compareTo(newValue) > 0) {
+                                    logger.debug("MERGE MIN: groupKey '{}', aggAlias '{}', new min: {}", groupKey, aggAlias, newValue);
+                                }
+                            } else if (newValue instanceof Comparable && existingValue == null) {
+                                existingRow.put(aggAlias, newValue);
+                                logger.debug("MERGE MIN: groupKey '{}', aggAlias '{}', initialized min: {}", groupKey, aggAlias, newValue);
+                            } else if (newValue instanceof Comparable) {
+                                logger.warn("MERGE MIN: existingValue for groupKey {}/{} was not Comparable. Overwriting. Existing: {}, New: {}", groupKey, aggAlias, existingValue, newValue);
+                                existingRow.put(aggAlias, newValue);
+                            }
+                            else {
+                                logger.warn("MERGE MIN: Values not Comparable for groupKey {}/{}. Existing: {}, New: {}. Skipping.", groupKey, aggAlias, existingValue, newValue);
+                            }
+                            break;
+                        case MAX:
+                            if (existingValue instanceof Comparable && newValue instanceof Comparable) {
+                                @SuppressWarnings("unchecked")
+                                Comparable<Object> compExisting = (Comparable<Object>) existingValue;
+                                if (compExisting.compareTo(newValue) < 0) {
+                                    existingRow.put(aggAlias, newValue);
+                                    logger.debug("MERGE MAX: groupKey '{}', aggAlias '{}', new max: {}", groupKey, aggAlias, newValue);
+                                }
+                            } else if (newValue instanceof Comparable && existingValue == null) {
+                                existingRow.put(aggAlias, newValue);
+                                 logger.debug("MERGE MAX: groupKey '{}', aggAlias '{}', initialized max: {}", groupKey, aggAlias, newValue);
+                            } else if (newValue instanceof Comparable) {
+                                logger.warn("MERGE MAX: existingValue for groupKey {}/{} was not Comparable. Overwriting. Existing: {}, New: {}", groupKey, aggAlias, existingValue, newValue);
+                                existingRow.put(aggAlias, newValue);
+                            }
+                             else {
+                                logger.warn("MERGE MAX: Values not Comparable for groupKey {}/{}. Existing: {}, New: {}. Skipping.", groupKey, aggAlias, existingValue, newValue);
+                            }
+                            break;
+                    }
+                }
                 }
             }
         }
@@ -622,42 +647,7 @@ public class ClusterManager {
         // Log le nombre de groupes trouvés
         logger.info("Nombre total de groupes trouvés: {}", groupedResults.size());
         
-        // Finalise les calculs et nettoie les champs temporaires
-        for (Map<String, Object> row : groupedResults.values()) {
-            for (Map.Entry<String, AggregateDefinition> entry : aggregateFunctions.entrySet()) {
-                String colName = entry.getKey();
-                AggregateFunction function = entry.getValue().getFunction();
-                
-                if (function == AggregateFunction.AVG) {
-                    Object sum = row.get(colName);
-                    Object count = row.get("__count_" + colName);
-                    if (sum instanceof Number && count instanceof Number) {
-                        double avg = ((Number) sum).doubleValue() / ((Number) count).doubleValue();
-                        row.put(colName, avg);
-                    }
-                    // Retire le compteur temporaire
-                    row.remove("__count_" + colName);
-                }
-                
-                // Traite les valeurs spéciales pour MIN et MAX
-                if (function == AggregateFunction.MIN && row.get(colName) instanceof Double) {
-                    double val = (Double) row.get(colName);
-                    if (val == Double.MAX_VALUE) {
-                        row.put(colName, 0.0); // Remplace par une valeur par défaut plus raisonnable
-                    }
-                }
-                
-                if (function == AggregateFunction.MAX && row.get(colName) instanceof Double) {
-                    double val = (Double) row.get(colName);
-                    if (val == Double.MIN_VALUE) {
-                        row.put(colName, 0.0); // Remplace par une valeur par défaut plus raisonnable
-                    }
-                }
-            }
-            
-            // Supprime tous les champs temporaires commençant par __
-            row.entrySet().removeIf(entry -> entry.getKey().startsWith("__"));
-        }
+
     }
     
     /**
@@ -782,4 +772,4 @@ public class ClusterManager {
             return null;
         }
     }
-} 
+} ;

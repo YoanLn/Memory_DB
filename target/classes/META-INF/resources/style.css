@@ -1,0 +1,62 @@
+body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background-color: #f8f9fa; /* Lighter background */
+}
+
+header h1 {
+    color: #343a40; /* Darker, more modern heading color */
+}
+
+.card {
+    box-shadow: 0 4px 8px rgba(0,0,0,0.05);
+    border: none; /* Softer look */
+}
+
+.card-title {
+    color: #007bff; /* Bootstrap primary color */
+}
+
+/* Response Area Styling */
+#responseArea {
+    background-color: #212529; /* Dark background for code/json */
+    color: #f8f9fa; /* Light text */
+    border-radius: .25rem; /* Consistent with Bootstrap cards */
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    min-height: 150px;
+    max-height: 600px;
+    overflow-y: auto;
+    font-family: 'Courier New', Courier, monospace; /* Monospace for code */
+    font-size: 0.9em;
+}
+
+/* Styling for different response states */
+#responseArea.loading {
+    color: #ffc107; /* Bootstrap warning color for loading text */
+}
+
+#responseArea.success {
+    border-left: 5px solid #28a745; /* Bootstrap success color */
+}
+
+#responseArea.error {
+    background-color: #3e2121; /* Darker red background for errors */
+    color: #f8d7da; /* Bootstrap danger text color */
+    border-left: 5px solid #dc3545; /* Bootstrap danger color */
+}
+
+/* Make textareas a bit taller by default for JSON input */
+textarea.form-control {
+    min-height: 120px;
+}
+
+/* Custom styles for specific elements if Bootstrap defaults aren't enough */
+#baseUrlInput {
+    max-width: 500px; /* Limit width of base URL input */
+}
+
+/* Ensure file inputs show selected file name (Bootstrap 5 does this by default) */
+.form-control[type="file"]:not(:disabled):not([readonly]) {
+    cursor: pointer;
+}
+

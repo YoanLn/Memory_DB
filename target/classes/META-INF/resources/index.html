@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MemoryDB UI</title>
+    <!-- Bootstrap CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container mt-4">
+        <header class="text-center mb-4">
+            <h1>MemoryDB Interactive UI</h1>
+        </header>
+
+        <div class="card mb-4">
+            <div class="card-body">
+                <h5 class="card-title">API Configuration</h5>
+                <div class="mb-3">
+                    <label for="baseUrlInput" class="form-label">API Base URL (e.g., http://localhost:8081/api):</label>
+                    <input type="text" class="form-control" id="baseUrlInput" value="http://localhost:8081/api">
+                </div>
+            </div>
+        </div>
+
+        <div class="row">
+            <div class="col-md-6 mb-4">
+                <div class="card">
+                    <div class="card-body">
+                        <h5 class="card-title">General Actions</h5>
+                        <button class="btn btn-primary" onclick="listTables()">List Tables</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-md-6 mb-4">
+                <div class="card">
+                    <div class="card-body">
+                        <h5 class="card-title">Get Table Stats</h5>
+                        <form id="getTableStatsForm">
+                            <div class="mb-3">
+                                <label for="statsTableNameInput" class="form-label">Table Name:</label>
+                                <input type="text" class="form-control" id="statsTableNameInput" value="parquet_file" required>
+                            </div>
+                            <button type="button" class="btn btn-info" onclick="getTableStats()">Get Stats</button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card mb-4">
+            <div class="card-body">
+                <h5 class="card-title">Create Table</h5>
+                <form id="createTableForm">
+                    <div class="mb-3">
+                        <label for="createTableNameInput" class="form-label">Table Name:</label>
+                        <input type="text" class="form-control" id="createTableNameInput" value="my_new_table" required>
+                    </div>
+                    <div class="mb-3">
+                        <label for="columnsJsonInput" class="form-label">Columns JSON:</label>
+                        <textarea class="form-control" id="columnsJsonInput" rows="8">[
+                            {"name": "VendorID", "type": "INTEGER", "nullable": true},
+                            {"name": "tpep_pickup_datetime", "type": "LONG", "nullable": true},
+                            {"name": "tpep_dropoff_datetime", "type": "LONG", "nullable": true},
+                            {"name": "passenger_count", "type": "LONG", "nullable": true},
+                            {"name": "trip_distance", "type": "DOUBLE", "nullable": true},
+                            {"name": "RatecodeID", "type": "LONG", "nullable": true},
+                            {"name": "store_and_fwd_flag", "type": "STRING", "nullable": true},
+                            {"name": "PULocationID", "type": "INTEGER", "nullable": true},
+                            {"name": "DOLocationID", "type": "INTEGER", "nullable": true},
+                            {"name": "payment_type", "type": "LONG", "nullable": true},
+                            {"name": "fare_amount", "type": "DOUBLE", "nullable": true},
+                            {"name": "extra", "type": "DOUBLE", "nullable": true},
+                            {"name": "mta_tax", "type": "DOUBLE", "nullable": true},
+                            {"name": "tip_amount", "type": "DOUBLE", "nullable": true},
+                            {"name": "tolls_amount", "type": "DOUBLE", "nullable": true},
+                            {"name": "improvement_surcharge", "type": "DOUBLE", "nullable": true},
+                            {"name": "total_amount", "type": "DOUBLE", "nullable": true},
+                            {"name": "congestion_surcharge", "type": "DOUBLE", "nullable": true},
+                            {"name": "Airport_fee", "type": "DOUBLE", "nullable": true},
+                            {"name": "cbd_congestion_fee", "type": "DOUBLE", "nullable": true}
+                          ]</textarea>
+                    </div>
+                    <button type="button" class="btn btn-success" onclick="createTable()">Create Table</button>
+                </form>
+            </div>
+        </div>
+
+        <div class="row">
+            <div class="col-md-6 mb-4">
+                <div class="card h-100">
+                    <div class="card-body">
+                        <h5 class="card-title">Load Parquet Data (Binary Stream)</h5>
+                        <p class="card-subtitle mb-2 text-muted small">Uses endpoint: <code>/tables/{tableName}/load-binary</code></p>
+                        <form id="loadBinaryForm">
+                            <div class="mb-3">
+                                <label for="loadBinaryTableNameInput" class="form-label">Table Name:</label>
+                                <input type="text" class="form-control" id="loadBinaryTableNameInput" value="parquet_file" required>
+                            </div>
+                            <div class="mb-3">
+                                <label for="parquetFileBinaryInput" class="form-label">Parquet File:</label>
+                                <input type="file" class="form-control" id="parquetFileBinaryInput" accept=".parquet" required>
+                            </div>
+                            <div class="mb-3">
+                                <label for="loadBinaryRowLimitInput" class="form-label">Row Limit (-1 for all):</label>
+                                <input type="number" class="form-control" id="loadBinaryRowLimitInput" value="1000">
+                            </div>
+                            <div class="mb-3">
+                                <label for="loadBinaryBatchSizeInput" class="form-label">Batch Size:</label>
+                                <input type="number" class="form-control" id="loadBinaryBatchSizeInput" value="100000">
+                            </div>
+                            <div class="mb-3">
+                                <label for="loadBinarySkipRowsInput" class="form-label">Skip Rows:</label>
+                                <input type="number" class="form-control" id="loadBinarySkipRowsInput" value="0">
+                            </div>
+                            <button type="button" class="btn btn-warning" onclick="loadParquetBinary()">Load Parquet (Binary)</button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-md-6 mb-4">
+                <div class="card h-100">
+                    <div class="card-body">
+                        <h5 class="card-title">Load Parquet Data (Distributed Upload)</h5>
+                        <p class="card-subtitle mb-2 text-muted small">Uses endpoint: <code>/tables/{tableName}/load-distributed-upload</code></p>
+                        <form id="loadDistributedForm">
+                            <div class="mb-3">
+                                <label for="loadDistributedTableNameInput" class="form-label">Table Name:</label>
+                                <input type="text" class="form-control" id="loadDistributedTableNameInput" value="parquet_file" required>
+                            </div>
+                            <div class="mb-3">
+                                <label for="parquetFileDistributedInput" class="form-label">Parquet File:</label>
+                                <input type="file" class="form-control" id="parquetFileDistributedInput" accept=".parquet" required>
+                            </div>
+                            <div class="mb-3">
+                                <label for="loadDistributedRowLimitInput" class="form-label">Row Limit (-1 for all):</label>
+                                <input type="number" class="form-control" id="loadDistributedRowLimitInput" value="-1">
+                            </div>
+                            <div class="mb-3">
+                                <label for="loadDistributedBatchSizeInput" class="form-label">Batch Size:</label>
+                                <input type="number" class="form-control" id="loadDistributedBatchSizeInput" value="100000">
+                            </div>
+                            <div class="mb-3">
+                                <label for="loadDistributedSkipRowsInput" class="form-label">Skip Rows:</label>
+                                <input type="number" class="form-control" id="loadDistributedSkipRowsInput" value="0">
+                            </div>
+                            <button type="button" class="btn btn-warning" onclick="loadParquetDistributed()">Load Parquet (Distributed)</button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card mb-4">
+            <div class="card-body">
+                <h5 class="card-title">Execute Query</h5>
+                <form id="executeQueryForm">
+                    <div class="mb-3">
+                        <label for="queryDtoJsonInput" class="form-label">Query DTO JSON:</label>
+                        <textarea class="form-control" id="queryDtoJsonInput" rows="12">{
+    "tableName": "parquet_file",
+    "columns": ["VendorID", "tip_amount", "total_amount"],
+    "conditions": [
+        {
+            "column": "VendorID",
+            "operator": "EQUALS",
+            "value": 1
+        },
+        {
+            "column": "tip_amount",
+            "operator": "GREATER_THAN",
+            "value": 5.0
+        }
+    ],
+    "aggregates": {
+        "avg_tip_amount": "AVG(tip_amount)",
+        "total_passengers": "SUM(passenger_count)",
+        "trip_count": "COUNT(*)"
+    },
+    "groupBy": ["VendorID"],
+    "orderBy": [
+        {"column": "VendorID", "ascending": true}
+    ],
+    "limit": 10,
+    "distributed": true,
+    "forwardedQuery": false
+}</textarea>
+                    </div>
+                    <button type="button" class="btn btn-primary" onclick="executeQuery()">Execute Query</button>
+                </form>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                API Response
+            </div>
+            <div class="card-body">
+                <pre id="responseArea" class="p-3"></pre>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- Bootstrap JS Bundle (Popper.js included) -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="script.js"></script>
+</body>
+</html>

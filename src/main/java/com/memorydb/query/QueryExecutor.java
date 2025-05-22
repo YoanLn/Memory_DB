@@ -5,6 +5,7 @@ import com.memorydb.core.DatabaseContext;
 import com.memorydb.core.Table;
 import com.memorydb.storage.ColumnStore;
 import com.memorydb.storage.TableData;
+import com.memorydb.common.DataType; // Ensure DataType is imported
 
 import javax.enterprise.context.ApplicationScoped;
 import javax.inject.Inject;
@@ -310,100 +311,148 @@ public class QueryExecutor {
      * @param rows Les index des lignes à agréger
      * @return La valeur agrégée
      */
-    private Object computeAggregate(AggregateFunction function, ColumnStore columnStore, List<Integer> rows) {
+private Object computeAggregate(AggregateFunction function, ColumnStore columnStore, List<Integer> rows) {
         if (rows.isEmpty()) {
             if (function == AggregateFunction.COUNT) {
-                return 0L; 
+                return 0L;
             }
-            return null; 
+            // For other aggregates on empty groups, result is null (or 0 for sum in AVG context, handled by computeSum)
+            if (function == AggregateFunction.AVG) {
+                Map<String, Object> avgMap = new HashMap<>();
+                avgMap.put("sum", 0.0);
+                avgMap.put("count", 0L);
+                return avgMap;
+            }
+            return null;
         }
-        
+
         switch (function) {
             case COUNT:
                 return (long) rows.size();
-                
+
             case SUM:
                 if (columnStore == null) throw new IllegalArgumentException("ColumnStore cannot be null for SUM aggregate.");
-                return computeSum(columnStore, rows);
-                
+                return computeSum(columnStore, rows, false); // false: not for AVG context
+
             case AVG:
                 if (columnStore == null) throw new IllegalArgumentException("ColumnStore cannot be null for AVG aggregate.");
-                Object sumResult = computeSum(columnStore, rows);
-                if (sumResult instanceof Number) {
-                    double numericSum = ((Number) sumResult).doubleValue();
-                    return numericSum / rows.size(); 
-                }
-                // If sumResult is null (e.g., all values in column were null), AVG is null.
-                return null; 
+                Object sumForAvg = computeSum(columnStore, rows, true); // true: for AVG context (return 0.0 if all null)
+                long countNonNull = countNonNullValues(columnStore, rows);
                 
+                Map<String, Object> avgMap = new HashMap<>();
+                avgMap.put("sum", (sumForAvg instanceof Number) ? ((Number) sumForAvg).doubleValue() : 0.0);
+                avgMap.put("count", countNonNull);
+                return avgMap;
+
             case MIN:
                 if (columnStore == null) throw new IllegalArgumentException("ColumnStore cannot be null for MIN aggregate.");
                 return computeMin(columnStore, rows);
-                
+
             case MAX:
                 if (columnStore == null) throw new IllegalArgumentException("ColumnStore cannot be null for MAX aggregate.");
                 return computeMax(columnStore, rows);
-                
+
             default:
-                throw new IllegalArgumentException("Fonction d'agrégation non supportée: " + function);
+                throw new UnsupportedOperationException("Fonction d'agrégation non supportée: " + function);
         }
     }
-    
-    /**
-     * Calcule la somme des valeurs
-     * @param columnStore Le stockage de colonne
-     * @param rows Les index des lignes
-     * @return La somme
-     */
+
+    private long countNonNullValues(ColumnStore columnStore, List<Integer> rows) {
+        if (columnStore == null || rows.isEmpty()) return 0L;
+        long count = 0;
+        for (int rowIndex : rows) {
+            // Assuming ColumnStore.getValue(rowIndex) exists and returns null if the value is SQL NULL
+            if (columnStore.getValue(rowIndex) != null) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    // New computeSum: handles nulls, returns 0.0 for all-null numerics in AVG context
+    private Object computeSum(ColumnStore columnStore, List<Integer> rows, boolean forAvgContext) {
+        if (columnStore == null || rows.isEmpty()) {
+            return forAvgContext ? 0.0 : null;
+        }
+
+        DataType type = columnStore.getType();
+        Double sumDouble = null;
+        Long sumLong = null;
+        boolean hasNonNullNumeric = false;
+
+        for (int rowIndex : rows) {
+            Object value = columnStore.getValue(rowIndex);
+            if (value == null) continue;
+
+            hasNonNullNumeric = true; // Mark that we found at least one non-null, type check later
+            switch (type) {
+                case INTEGER:
+                    if (value instanceof Number) { // Additional check for safety
+                        if (sumLong == null) sumLong = 0L;
+                        sumLong += ((Number) value).longValue();
+                    } else { hasNonNullNumeric = false; break; } // Non-numeric in numeric column?
+                    break;
+                case LONG:
+                     if (value instanceof Number) {
+                        if (sumLong == null) sumLong = 0L;
+                        sumLong += ((Number) value).longValue();
+                    } else { hasNonNullNumeric = false; break; }
+                    break;
+                case FLOAT:
+                    if (value instanceof Number) {
+                        if (sumDouble == null) sumDouble = 0.0;
+                        sumDouble += ((Number) value).floatValue(); // Use floatValue for precision matching type
+                    } else { hasNonNullNumeric = false; break; }
+                    break;
+                case DOUBLE:
+                    // DECIMAL is not a defined DataType, assuming it's handled as DOUBLE
+                    if (value instanceof Number) {
+                        if (sumDouble == null) sumDouble = 0.0;
+                        sumDouble += ((Number) value).doubleValue();
+                    } else { hasNonNullNumeric = false; break; }
+                    break;
+                default:
+                    // Non-numeric type, sum is not applicable for SUM aggregate
+                    // For AVG context, if type is non-numeric, sum part is 0.0.
+                    hasNonNullNumeric = false; // Reset as this value is not summable in a numeric sense
+                    break; // Break from switch
+            }
+            if (!hasNonNullNumeric && type.isNumeric()) { // If a value in a numeric column was not a number
+                 // This case might indicate data type mismatch or corruption, log warning?
+                 // For now, let it proceed, hasNonNullNumeric will be false if all numerics were like this
+            }
+        }
+
+        if (!hasNonNullNumeric && type.isNumeric()) { // If numeric type but no valid numbers found (all null or non-instanceof Number)
+            return forAvgContext ? 0.0 : null;
+        }
+        if (!type.isNumeric()) { // If not a numeric type at all
+             return forAvgContext ? 0.0 : null; // SUM for non-numeric is null (or 0.0 for AVG context)
+        }
+
+        if (sumLong != null) return sumLong;
+        if (sumDouble != null) return sumDouble;
+        
+        // If reached, means it was a numeric type, but all values were null or not Number instances.
+        return forAvgContext ? 0.0 : null;
+    }
+
+    // Original computeSum, now delegates to the new one.
+    // Kept for compatibility if other parts of the code call it directly for SUM aggregate.
     private Object computeSum(ColumnStore columnStore, List<Integer> rows) {
-        switch (columnStore.getType()) {
-            case INTEGER:
-                int intSum = 0;
-                for (int row : rows) {
-                    if (!columnStore.isNull(row)) {
-                        intSum += columnStore.getInt(row);
-                    }
-                }
-                return intSum;
-                
-            case LONG:
-                long longSum = 0L;
-                for (int row : rows) {
-                    if (!columnStore.isNull(row)) {
-                        longSum += columnStore.getLong(row);
-                    }
-                }
-                return longSum;
-                
-            case FLOAT:
-                float floatSum = 0.0f;
-                for (int row : rows) {
-                    if (!columnStore.isNull(row)) {
-                        floatSum += columnStore.getFloat(row);
-                    }
-                }
-                return floatSum;
-                
-            case DOUBLE:
-                double doubleSum = 0.0;
-                for (int row : rows) {
-                    if (!columnStore.isNull(row)) {
-                        doubleSum += columnStore.getDouble(row);
-                    }
-                }
-                return doubleSum;
-                
-            default:
-                throw new IllegalArgumentException("Type non supporté pour SUM: " + columnStore.getType());
+        // Check if columnStore itself is null or rows are empty before calling getType on columnStore
+        if (columnStore == null || rows.isEmpty()) {
+             // For a direct SUM aggregate, if there's nothing to sum, result is null.
+            return null; 
         }
+        // Existing logic for SUM (non-AVG context)
+        // This part should ideally also use the new computeSum(cs, rows, false)
+        // For now, let's assume the old logic was specific for SUM and needs to be preserved if different.
+        // OR, more cleanly, just delegate:
+        return computeSum(columnStore, rows, false); 
+        // The old switch logic for computeSum is now effectively replaced by the new computeSum(..., ..., false).
     }
     
-    /**
-     * Calcule le minimum des valeurs
-     * @param columnStore Le stockage de colonne
-     * @param rows Les index des lignes
-     * @return Le minimum
-     */
     private Object computeMin(ColumnStore columnStore, List<Integer> rows) {
         // Implémentation simplifiée pour les types courants
         switch (columnStore.getType()) {
