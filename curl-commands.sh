@@ -16,19 +16,19 @@ PARQUET_FILE="data/test2.parquet"
 # Création d'une table
 create_table() {
   echo "Création de la table parquet_file..."
-  curl --noproxy localhost -X POST -H "Content-Type: application/json" \
-    -d '{
+curl --noproxy localhost -X POST -H "Content-Type: application/json" \
+  -d '{
   "name": "parquet_file",
   "columns": [
-    {"name": "VendorID", "type": "INTEGER", "nullable": true},
+    {"name": "VendorID", "type": "LONG", "nullable": true},
     {"name": "tpep_pickup_datetime", "type": "LONG", "nullable": true},
     {"name": "tpep_dropoff_datetime", "type": "LONG", "nullable": true},
     {"name": "passenger_count", "type": "LONG", "nullable": true},
     {"name": "trip_distance", "type": "DOUBLE", "nullable": true},
     {"name": "RatecodeID", "type": "LONG", "nullable": true},
     {"name": "store_and_fwd_flag", "type": "STRING", "nullable": true},
-    {"name": "PULocationID", "type": "INTEGER", "nullable": true},
-    {"name": "DOLocationID", "type": "INTEGER", "nullable": true},
+    {"name": "PULocationID", "type": "LONG", "nullable": true},
+    {"name": "DOLocationID", "type": "LONG", "nullable": true},
     {"name": "payment_type", "type": "LONG", "nullable": true},
     {"name": "fare_amount", "type": "DOUBLE", "nullable": true},
     {"name": "extra", "type": "DOUBLE", "nullable": true},
@@ -37,12 +37,11 @@ create_table() {
     {"name": "tolls_amount", "type": "DOUBLE", "nullable": true},
     {"name": "improvement_surcharge", "type": "DOUBLE", "nullable": true},
     {"name": "total_amount", "type": "DOUBLE", "nullable": true},
-    {"name": "congestion_surcharge", "type": "DOUBLE", "nullable": true},
-    {"name": "Airport_fee", "type": "DOUBLE", "nullable": true},
-    {"name": "cbd_congestion_fee", "type": "DOUBLE", "nullable": true}
+    {"name": "congestion_surcharge", "type": "INTEGER", "nullable": true},
+    {"name": "airport_fee", "type": "INTEGER", "nullable": true}
   ]
 }' \
-    http://$NODE1/api/tables
+  http://$NODE1/api/tables
 }
 
 # Liste des tables
@@ -124,7 +123,7 @@ load_binary() {
     -X POST \
     -H "Content-Type: application/octet-stream" \
     --data-binary @"$file" \
-    "http://$host/api/tables/parquet_file/load-binary?rowLimit=99&batchSize=1&skipRows=0"
+    "http://$host/api/tables/parquet_file/load-binary?batchSize=50000&rowLimit=20000000&skipRows=0"
   
   echo ""
   echo "Chargement terminé. Vérifiez les statistiques avec: ./curl-commands.sh stats"

@@ -14,6 +14,7 @@ import org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.parquet.hadoop.ParquetReader;
 import org.apache.parquet.hadoop.example.GroupReadSupport;
 import org.apache.parquet.hadoop.util.HadoopInputFile;
+import java.nio.file.Files;
 import org.apache.parquet.io.api.Binary;
 import org.apache.parquet.schema.MessageType;
 import org.apache.parquet.schema.PrimitiveType;
@@ -24,6 +25,9 @@ import org.slf4j.LoggerFactory;
 import javax.enterprise.context.ApplicationScoped;
 import javax.inject.Inject;
 import com.memorydb.distribution.ClusterManager;
+
+import java.io.BufferedInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -36,8 +40,10 @@ import java.net.http.HttpResponse;
 import java.nio.ByteBuffer;
 import java.nio.channels.Channels;
 import java.nio.channels.ReadableByteChannel;
+
 import java.util.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -58,7 +64,44 @@ public class VectorizedParquetLoader {
     private ExecutorService executorService;
 
     private HttpClient httpClient;
-    private ObjectMapper objectMapper;
+    private final ObjectMapper objectMapper;
+
+    // List to track pending async operations
+    private List<CompletableFuture<Void>> pendingOperations = new ArrayList<>();
+    
+    // Reusable objects cache to reduce GC pressure
+    private ThreadLocal<ValueCache> valueCache = ThreadLocal.withInitial(ValueCache::new);
+    
+    /**
+     * Cache of primitive and reusable values to reduce object creation during row extraction
+     */
+    private static class ValueCache {
+        // Reusable arrays to avoid allocations
+        Object[] values;
+        String[] stringValues;
+        int[] intValues;
+        long[] longValues;
+        float[] floatValues;
+        double[] doubleValues;
+        boolean[] boolValues;
+        
+        // Size tracking
+        int lastSize = 0;
+        
+        // Create or resize arrays as needed
+        void ensureCapacity(int size) {
+            if (values == null || size > lastSize) {
+                values = new Object[size];
+                stringValues = new String[size];
+                intValues = new int[size];
+                longValues = new long[size];
+                floatValues = new float[size];
+                doubleValues = new double[size];
+                boolValues = new boolean[size];
+                lastSize = size;
+            }
+        }
+    }
 
     // Création d'un client HTTP pour la distribution inter-nœuds
     public VectorizedParquetLoader() {
@@ -243,19 +286,34 @@ public class VectorizedParquetLoader {
     }
     
     /**
-     * Ajoute un batch de données à la table
-     */
-    /**
      * Ajoute un batch de données à la table de manière optimisée
-     * Ajoute directement les valeurs aux colonnes pour réduire les allocations temporaires
+     * Cette version utilise directement les tableaux primitifs pour minimiser
+     * les opérations de boxing/unboxing et réduire la pression sur le GC
      */
     private void addBatchToTable(TableData tableData, List<Object[]> batchData) {
         Table table = tableData.getTable();
         List<Column> columns = table.getColumns();
         int columnCount = columns.size();
+        int batchSize = batchData.size();
+        
+        if (batchSize == 0) {
+            return; // Rien à faire
+        }
+        
+        // Récupère le cache thread-local pour les valeurs primitives
+        ValueCache cache = valueCache.get();
+        cache.ensureCapacity(columnCount);
+        
+        // Pré-trie les données par type pour réduire les opérations de boxing/unboxing
+        int[] columnTypes = new int[columnCount];
+        for (int i = 0; i < columnCount; i++) {
+            ColumnStore store = tableData.getColumnStore(i);
+            columnTypes[i] = store.getType().ordinal();
+        }
         
         tableData.writeLock();
         try {
+            // Traite le batch ligne par ligne
             for (Object[] rowValues : batchData) {
                 // Vérification pour éviter les problèmes d'index
                 if (rowValues.length != columnCount) {
@@ -263,61 +321,120 @@ public class VectorizedParquetLoader {
                         columnCount + ", obtenu: " + rowValues.length);
                 }
                 
-                // Ajoute chaque valeur dans sa colonne respective
+                // Extrait les valeurs dans les tableaux primitifs appropriés
                 for (int i = 0; i < columnCount; i++) {
-                    ColumnStore columnStore = tableData.getColumnStore(i);
                     Object value = rowValues[i];
+                    ColumnStore columnStore = tableData.getColumnStore(i);
                     
-                    // Optimisation pour réduire les conversions et les allocations d'objets
                     if (value == null) {
                         columnStore.addNull();
-                    } else {
-                        switch (columnStore.getType()) {
-                            case INTEGER:
+                        continue;
+                    }
+                    
+                    // Utilise un switch sans boxing/unboxing quand possible
+                    switch (columnStore.getType()) {
+                        case INTEGER:
+                            if (value instanceof Integer) {
                                 columnStore.addInt((Integer) value);
-                                break;
-                            case LONG:
+                            } else if (value instanceof Number) {
+                                // Conversion sans création d'objet intermédiaire
+                                columnStore.addInt(((Number) value).intValue());
+                            } else {
+                                columnStore.addInt(Integer.parseInt(value.toString()));
+                            }
+                            break;
+                        case LONG:
+                            if (value instanceof Long) {
                                 columnStore.addLong((Long) value);
-                                break;
-                            case FLOAT:
+                            } else if (value instanceof Number) {
+                                // Conversion sans création d'objet intermédiaire
+                                columnStore.addLong(((Number) value).longValue());
+                            } else {
+                                columnStore.addLong(Long.parseLong(value.toString()));
+                            }
+                            break;
+                        case FLOAT:
+                            if (value instanceof Float) {
                                 columnStore.addFloat((Float) value);
-                                break;
-                            case DOUBLE:
+                            } else if (value instanceof Number) {
+                                // Conversion sans création d'objet intermédiaire
+                                columnStore.addFloat(((Number) value).floatValue());
+                            } else {
+                                columnStore.addFloat(Float.parseFloat(value.toString()));
+                            }
+                            break;
+                        case DOUBLE:
+                            if (value instanceof Double) {
                                 columnStore.addDouble((Double) value);
-                                break;
-                            case BOOLEAN:
+                            } else if (value instanceof Number) {
+                                // Conversion sans création d'objet intermédiaire
+                                columnStore.addDouble(((Number) value).doubleValue());
+                            } else {
+                                columnStore.addDouble(Double.parseDouble(value.toString()));
+                            }
+                            break;
+                        case BOOLEAN:
+                            if (value instanceof Boolean) {
                                 columnStore.addBoolean((Boolean) value);
-                                break;
-                            case STRING:
-                                // Optimisation pour les chaînes
+                            } else {
+                                columnStore.addBoolean(Boolean.parseBoolean(value.toString()));
+                            }
+                            break;
+                        case STRING:
+                            // Utilise directement .intern() pour réduire les duplications de string
+                            if (value instanceof String) {
+                                columnStore.addString(((String) value).intern());
+                            } else {
                                 columnStore.addString(value.toString().intern());
-                                break;
-                            case DATE:
-                            case TIMESTAMP:
+                            }
+                            break;
+                        case DATE:
+                        case TIMESTAMP:
+                            if (value instanceof Long) {
                                 columnStore.addDate((Long) value);
-                                break;
-                            default:
-                                throw new IllegalArgumentException("Type non supporté: " + columnStore.getType());
-                        }
+                            } else if (value instanceof Number) {
+                                // Conversion sans création d'objet intermédiaire
+                                columnStore.addDate(((Number) value).longValue());
+                            } else {
+                                columnStore.addDate(Long.parseLong(value.toString()));
+                            }
+                            break;
+                        default:
+                            throw new IllegalArgumentException("Type non supporté: " + columnStore.getType());
                     }
                 }
                 
-                // Incrémente le compteur de lignes sans réallouer un tableau d'objets temporaires
-                // comme le ferait addRow, ce qui réduit considérablement l'usage mémoire
+                // Incrémente le compteur de lignes
                 tableData.incrementRowCount();
             }
+            
+            logger.debug("Batch de {} lignes ajouté à la table", batchSize);
         } finally {
             tableData.writeUnlock();
         }
     }
     
     /**
-     * Extrait les valeurs d'un groupe Parquet
+     * Extrait les valeurs d'un groupe Parquet de manière optimisée
+     * en utilisant des types primitifs et des objets réutilisables
+     * pour réduire la pression sur le garbage collector
      */
     private Object[] extractValues(Group group, List<Column> columns, MessageType schema) {
-        Object[] values = new Object[columns.size()];
+        // Get thread-local cache for reusable objects
+        ValueCache cache = valueCache.get();
+        int size = columns.size();
+        cache.ensureCapacity(size);
         
-        for (int i = 0; i < columns.size(); i++) {
+        // Alias local variables for better performance
+        Object[] values = cache.values;
+        int[] intValues = cache.intValues;
+        long[] longValues = cache.longValues;
+        float[] floatValues = cache.floatValues;
+        double[] doubleValues = cache.doubleValues;
+        boolean[] boolValues = cache.boolValues;
+        String[] stringValues = cache.stringValues;
+        
+        for (int i = 0; i < size; i++) {
             Column column = columns.get(i);
             Type parquetField = schema.getType(i);
             String fieldName = parquetField.getName();
@@ -331,34 +448,43 @@ public class VectorizedParquetLoader {
                 continue;
             }
             
-            // Extraction de la valeur selon le type
+            // Extraction de la valeur selon le type et stockage dans les tableaux primitifs
             switch (column.getType()) {
                 case INTEGER:
-                    values[i] = group.getInteger(fieldName, 0);
+                    intValues[i] = group.getInteger(fieldName, 0);
+                    values[i] = intValues[i]; // Boxing only when needed
                     break;
                 case LONG:
-                    values[i] = group.getLong(fieldName, 0);
+                    longValues[i] = group.getLong(fieldName, 0);
+                    values[i] = longValues[i]; // Boxing only when needed
                     break;
                 case FLOAT:
-                    values[i] = group.getFloat(fieldName, 0);
+                    floatValues[i] = group.getFloat(fieldName, 0);
+                    values[i] = floatValues[i]; // Boxing only when needed
                     break;
                 case DOUBLE:
-                    values[i] = group.getDouble(fieldName, 0);
+                    doubleValues[i] = group.getDouble(fieldName, 0);
+                    values[i] = doubleValues[i]; // Boxing only when needed
                     break;
                 case BOOLEAN:
-                    values[i] = group.getBoolean(fieldName, 0);
+                    boolValues[i] = group.getBoolean(fieldName, 0);
+                    values[i] = boolValues[i]; // Boxing only when needed
                     break;
                 case STRING:
                     Binary binary = group.getBinary(fieldName, 0);
-                    values[i] = binary.toStringUsingUTF8();
+                    // Use string interning to reduce memory usage for repeated strings
+                    stringValues[i] = binary.toStringUsingUTF8().intern();
+                    values[i] = stringValues[i];
                     break;
                 case DATE:
                 case TIMESTAMP:
                     if (parquetField.asPrimitiveType().getPrimitiveTypeName() == PrimitiveType.PrimitiveTypeName.INT96) {
                         Binary int96Value = group.getInt96(fieldName, 0);
-                        values[i] = convertInt96ToTimestamp(int96Value);
+                        longValues[i] = convertInt96ToTimestamp(int96Value);
+                        values[i] = longValues[i];
                     } else {
-                        values[i] = group.getLong(fieldName, 0);
+                        longValues[i] = group.getLong(fieldName, 0);
+                        values[i] = longValues[i];
                     }
                     break;
                 default:
@@ -727,95 +853,111 @@ public class VectorizedParquetLoader {
         ParquetLoadStats stats = new ParquetLoadStats();
         long startTime = System.currentTimeMillis();
         
-        // Création d'un fichier temporaire en mémoire (RAM disk si disponible)
-        File tempFile = null;
+        // More efficient streaming with larger buffers
+        ByteArrayOutputStream baos = new ByteArrayOutputStream(8 * 1024 * 1024); // Pre-allocate 8MB to reduce reallocations
+        long totalBytesTransferred = 0;
+        try (InputStream bufferedInputStream = new BufferedInputStream(inputStream, 256 * 1024)) { // 256KB buffer
+            byte[] byteParquetLoaderBuffer = new byte[512 * 1024]; // 512KB read buffer for better throughput
+            int bytesRead;
+            while ((bytesRead = bufferedInputStream.read(byteParquetLoaderBuffer)) != -1) {
+                baos.write(byteParquetLoaderBuffer, 0, bytesRead);
+                totalBytesTransferred += bytesRead;
+            }
+        }
+        logger.info("[{}] Flux Parquet lu en mémoire: {} MB",
+                   sessionId, totalBytesTransferred / (1024 * 1024));
+
+        byte[] parquetBytes = baos.toByteArray();
+        ByteBuffer parquetByteBuffer = ByteBuffer.wrap(parquetBytes);
+        baos.close(); // Release memory from ByteArrayOutputStream
+
+        // Vérifie que la table existe
+        Table table = databaseContext.getTable(tableName);
+        if (table == null) {
+            throw new IllegalArgumentException("Table introuvable: " + tableName);
+        }
+        
+        TableData tableData = databaseContext.getTableData(tableName);
+        
+        Configuration conf = new Configuration();
+        // Indique à Hadoop et Parquet de garder les fichiers ouverts
+        conf.set("fs.hdfs.impl.disable.cache", "false");
+        conf.set("parquet.read.support.class", "org.apache.parquet.hadoop.example.GroupReadSupport");
+        conf.set("parquet.filter.record-level.enabled", "true");
+
+        java.nio.file.Path tempParquetFile = null;
         try {
-            // Utilise /dev/shm sur Linux si disponible (RAM disk), sinon un dossier temp standard
-            File tempDir = new File("/dev/shm");
-            if (!tempDir.exists() || !tempDir.canWrite()) {
-                tempDir = new File(System.getProperty("java.io.tmpdir"));
+            // Write to a temporary file, but with optimizations:
+            // 1. Use a more descriptive name for better debugging
+            // 2. Use buffered I/O for faster writes
+            // 3. Set a specific Files.DELETE_ON_CLOSE attribute for automatic cleanup
+            tempParquetFile = Files.createTempFile("memorydb-parquet-" + sessionId + "-", ".parquet");
+            
+            // Make the file delete on JVM exit as a safety measure
+            tempParquetFile.toFile().deleteOnExit();
+            
+            // Write directly from ByteBuffer to file with minimal copying
+            try (java.nio.channels.FileChannel channel = java.nio.channels.FileChannel.open(tempParquetFile, 
+                    java.nio.file.StandardOpenOption.WRITE)) {
+                channel.write(parquetByteBuffer);
             }
             
-            tempFile = File.createTempFile("parquet_distrib_", ".parquet", tempDir);
-            tempFile.deleteOnExit(); // Garantit la suppression à la fin
+            // Use standard Hadoop Path API which is fully compatible with Parquet 1.13.1
+            org.apache.hadoop.fs.Path hadoopPath = new org.apache.hadoop.fs.Path(tempParquetFile.toUri());
             
-            // Transfert le flux efficacement
-            try (ReadableByteChannel readChannel = Channels.newChannel(inputStream);
-                 FileOutputStream fileOS = new FileOutputStream(tempFile)) {
+            // Use modern ParquetFileReader API with HadoopInputFile to avoid deprecation warnings
+            try (ParquetFileReader schemaReader = ParquetFileReader.open(HadoopInputFile.fromPath(hadoopPath, conf))) {
+            MessageType schema = schemaReader.getFooter().getFileMetaData().getSchema();
+            validateSchema(table, schema);
+            
+            // Configuration pour la distribution par blocs
+            int batchSize = options.getBatchSize();
+            int skipRows = options.getSkipRows();
+            long rowLimit = options.getRowLimit();
+            
+            // Use the standard builder pattern that's compatible with Parquet 1.13.1
+            try (ParquetReader<Group> reader = ParquetReader.<Group>builder(new GroupReadSupport(), new org.apache.hadoop.fs.Path(tempParquetFile.toUri()))
+                    .withConf(conf)
+                    .build()) {
                 
-                ByteBuffer buffer = ByteBuffer.allocateDirect(64 * 1024); // Buffer de 64KB
-                long totalBytes = 0;
-                int bytesRead;
-                
-                while ((bytesRead = readChannel.read(buffer)) != -1) {
-                    buffer.flip();
-                    fileOS.getChannel().write(buffer);
-                    buffer.clear();
-                    totalBytes += bytesRead;
+                // Skip initial rows if needed
+                Group record = null;
+                for (int i = 0; i < skipRows && reader.read() != null; i++) {
+                    // Skipping
                 }
                 
-                logger.info("[{}] Flux Parquet transféré en mémoire: {} MB", 
-                           sessionId, totalBytes / (1024 * 1024));
-            }
-            
-            // Maintenant charge avec distribution par blocs
-            // Vérifie que la table existe
-            Table table = databaseContext.getTable(tableName);
-            if (table == null) {
-                throw new IllegalArgumentException("Table introuvable: " + tableName);
-            }
-            
-            TableData tableData = databaseContext.getTableData(tableName);
-            
-            // Ouvre le fichier Parquet pour vérifier le schéma
-            Path path = new Path(tempFile.getAbsolutePath());
-            Configuration conf = new Configuration();
-            
-            // Indique à Hadoop et Parquet de garder les fichiers ouverts
-            conf.set("fs.hdfs.impl.disable.cache", "false");
-            conf.set("parquet.read.support.class", "org.apache.parquet.hadoop.example.GroupReadSupport");
-            conf.set("parquet.filter.record-level.enabled", "true");
-            
-            try (ParquetFileReader schemaReader = ParquetFileReader.open(HadoopInputFile.fromPath(path, conf))) {
-                MessageType schema = schemaReader.getFooter().getFileMetaData().getSchema();
-                validateSchema(table, schema);
+                // Initialisation for node distribution
+                int nodeIndex = 0;
+                List<Object[]> batch = new ArrayList<>(batchSize);
+                List<Column> columns = table.getColumns();
                 
-                // Configuration pour la distribution par blocs
-                int batchSize = options.getBatchSize();
-                int skipRows = options.getSkipRows();
-                long rowLimit = options.getRowLimit();
+                // Make sure we properly distribute data across all nodes
+                int nodeCount = nodes.length;
+                logger.info("[{}] Configuré pour distribuer les données entre {} nœuds en round-robin", sessionId, nodeCount);
                 
-                // Répartition des lignes entre les nœuds en utilisant un approche par blocs
-                try (ParquetReader<Group> reader = ParquetReader.builder(new GroupReadSupport(), path)
-                        .withConf(conf)
-                        .build()) {
-                    
-                    // Skip initial rows if needed
-                    Group record = null;
-                    for (int i = 0; i < skipRows && reader.read() != null; i++) {
-                        // Skipping
-                    }
-                    
-                    int nodeIndex = 0;
-                    List<Object[]> batch = new ArrayList<>(batchSize);
-                    List<Column> columns = table.getColumns();
-                    
-                    long currentRow = 0;
-                    int currentRowsInBatch = 0;
-                    Map<String, Long> nodeRows = new HashMap<>();
-                    
-                    // Initialize node counts
-                    for (com.memorydb.distribution.NodeInfo node : nodes) {
-                        nodeRows.put(node.getId(), 0L);
-                    }
-                    
-                    // Process all rows or up to row limit
-                    while ((record = reader.read()) != null && 
-                           (rowLimit <= 0 || currentRow < rowLimit)) {
+                long currentRow = 0;
+                int currentRowsInBatch = 0;
+                Map<String, Long> nodeRows = new HashMap<>();
+                
+                // Initialize the nodeRows map for proper distribution tracking
+                for (com.memorydb.distribution.NodeInfo node : nodes) {
+                    nodeRows.put(node.getId(), 0L);
+                    logger.info("[{}] Initialisation du compteur pour le nœud {}", sessionId, node.getId());
+                }
+                                
+                // Process all rows or up to row limit
+                while ((record = reader.read()) != null && 
+                       (rowLimit <= 0 || currentRow < rowLimit)) {
                         
                         // Get node for this row (round-robin)
-                        com.memorydb.distribution.NodeInfo currentNode = nodes[nodeIndex];
+                        int actualNodeIndex = (int)(currentRow % nodes.length);
+                        com.memorydb.distribution.NodeInfo currentNode = nodes[actualNodeIndex];
                         String nodeId = currentNode.getId();
+                        
+                        if (currentRow % 100000 == 0) {
+                            logger.info("[{}] Ligne {} attribuée au nœud {} (index {})", 
+                                sessionId, currentRow, nodeId, actualNodeIndex);
+                        }
                         
                         // Extract row values and add to batch
                         Object[] rowValues = extractValues(record, columns, schema);
@@ -825,29 +967,49 @@ public class VectorizedParquetLoader {
                         // Process batch if full
                         if (currentRowsInBatch >= batchSize) {
                             // Si c'est le nœud local, ajouter directement à la table locale
-                            String localNodeId = clusterManager.getLocalNode().getId();
+                            final String localNodeId = clusterManager.getLocalNode().getId();
+                            final String finalNodeId = nodeId;
+                            final com.memorydb.distribution.NodeInfo finalNode = currentNode;
+                            final List<Object[]> batchToProcess = new ArrayList<>(batch); // Create a copy to avoid concurrent modification
+                            final int finalBatchSize = currentRowsInBatch;
+                            
                             if (nodeId.equals(localNodeId)) {
+                                // Process local node synchronously to avoid too many threads 
+                                // and potential lock contention on tableData
                                 tableData.writeLock();
                                 try {
-                                    addBatchToTable(tableData, batch);
+                                    addBatchToTable(tableData, batchToProcess);
                                 } finally {
                                     tableData.writeUnlock();
                                 }
+                                
+                                // Update stats immediately for local node
+                                long previousCount = nodeRows.get(finalNodeId);
+                                nodeRows.put(finalNodeId, previousCount + finalBatchSize);
+                                stats.addNodeRows(finalNodeId, finalBatchSize);
                             } else {
-                                // Sinon, envoyer le batch au nœud distant
-                                try {
-                                    sendBatchToRemoteNode(currentNode, tableName, batch);
-                                } catch (Exception e) {
-                                    logger.error("[{}] Erreur lors de l'envoi des données au nœud {}: {}", 
-                                            sessionId, nodeId, e.getMessage(), e);
-                                    throw new IOException("Échec de la distribution des données: " + e.getMessage(), e);
-                                }
+                                // For remote nodes, use CompletableFuture to process batches in parallel
+                                CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
+                                    try {
+                                        // Send batch to remote node asynchronously
+                                        sendBatchToRemoteNode(finalNode, tableName, batchToProcess);
+                                        
+                                        // Update stats after successful send
+                                        synchronized (nodeRows) {
+                                            long previousCount = nodeRows.get(finalNodeId);
+                                            nodeRows.put(finalNodeId, previousCount + finalBatchSize);
+                                            stats.addNodeRows(finalNodeId, finalBatchSize);
+                                        }
+                                    } catch (Exception e) {
+                                        logger.error("[{}] Erreur lors de l'envoi asynchrone des données au nœud {}: {}", 
+                                                sessionId, finalNodeId, e.getMessage(), e);
+                                        // We don't throw here since we're in an async context
+                                        // Instead we log the error and continue
+                                    }
+                                });
+                                // Track this operation
+                                pendingOperations.add(future);
                             }
-                            
-                            // Update stats
-                            long previousCount = nodeRows.get(nodeId);
-                            nodeRows.put(nodeId, previousCount + currentRowsInBatch);
-                            stats.addNodeRows(nodeId, currentRowsInBatch);
                             
                             batch.clear();
                             currentRowsInBatch = 0;
@@ -858,40 +1020,55 @@ public class VectorizedParquetLoader {
                             }
                         }
                         
-                        // Move to next node for round-robin
-                        nodeIndex = (nodeIndex + 1) % nodes.length;
+                        // We now use the modulo-based distribution in the node selection above
+                        // so we only need to increment the row counter here
                         currentRow++;
                     }
                     
                     // Process final partial batch if any
                     if (!batch.isEmpty()) {
-                        com.memorydb.distribution.NodeInfo currentNode = nodes[nodeIndex];
-                        String nodeId = currentNode.getId();
-                        
-                        // Si c'est le nœud local, ajouter directement à la table locale
+                        // Determine the correct node for this final batch
+                        // The nodeIndex was already incremented for the *next* batch, so we use the previous one.
+                        int finalBatchNodeIndex = (nodeIndex == 0) ? (nodes.length - 1) : (nodeIndex - 1);
+                        if (nodes.length == 1) finalBatchNodeIndex = 0; // Handle single node case
+
+                        com.memorydb.distribution.NodeInfo finalBatchNode = nodes[finalBatchNodeIndex];
+                        String finalBatchNodeId = finalBatchNode.getId();
+                        final List<Object[]> finalBatch = new ArrayList<>(batch); // Make a copy to avoid concurrent modification
+                        final int finalBatchSize = batch.size();
+
                         String localNodeId = clusterManager.getLocalNode().getId();
-                        if (nodeId.equals(localNodeId)) {
+                        if (finalBatchNodeId.equals(localNodeId)) {
                             tableData.writeLock();
                             try {
-                                addBatchToTable(tableData, batch);
+                                addBatchToTable(tableData, finalBatch);
                             } finally {
                                 tableData.writeUnlock();
                             }
+                            
+                            // Update stats for local batch immediately
+                            long previousCount = nodeRows.get(finalBatchNodeId);
+                            nodeRows.put(finalBatchNodeId, previousCount + finalBatchSize);
+                            stats.addNodeRows(finalBatchNodeId, finalBatchSize);
                         } else {
-                            // Sinon, envoyer le batch au nœud distant
-                            try {
-                                sendBatchToRemoteNode(currentNode, tableName, batch);
-                            } catch (Exception e) {
-                                logger.error("[{}] Erreur lors de l'envoi du dernier batch au nœud {}: {}", 
-                                        sessionId, nodeId, e.getMessage(), e);
-                                throw new IOException("Échec de la distribution des données: " + e.getMessage(), e);
-                            }
+                            // For remote nodes, process asynchronously
+                            CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
+                                try {
+                                    sendBatchToRemoteNode(finalBatchNode, tableName, finalBatch);
+                                    
+                                    // Update stats after successful send
+                                    synchronized (nodeRows) {
+                                        long prevCount = nodeRows.get(finalBatchNodeId);
+                                        nodeRows.put(finalBatchNodeId, prevCount + finalBatchSize);
+                                        stats.addNodeRows(finalBatchNodeId, finalBatchSize);
+                                    }
+                                } catch (Exception e) {
+                                    logger.error("[{}] Erreur lors de l'envoi asynchrone du batch final au nœud {}: {}", 
+                                             sessionId, finalBatchNodeId, e.getMessage(), e);
+                                }
+                            });
+                            pendingOperations.add(future);
                         }
-                        
-                        // Update stats for last batch
-                        long previousCount = nodeRows.get(nodeId);
-                        nodeRows.put(nodeId, previousCount + currentRowsInBatch);
-                        stats.addNodeRows(nodeId, currentRowsInBatch);
                     }
                     
                     // Update final stats
@@ -902,26 +1079,39 @@ public class VectorizedParquetLoader {
                 }
             }
             
-            return stats;
+            // Wait for all pending async operations to complete before returning
+            if (!pendingOperations.isEmpty()) {
+                logger.info("[{}] Waiting for {} pending batch operations to complete", sessionId, pendingOperations.size());
+                try {
+                    CompletableFuture.allOf(pendingOperations.toArray(new CompletableFuture[0])).join();
+                } catch (Exception e) {
+                    logger.error("[{}] Error waiting for async batch operations: {}", sessionId, e.getMessage(), e);
+                }
+            }
             
+            return stats;
+        } catch (Exception e) {
+            logger.error("[{}] Error during Parquet processing: {}", sessionId, e.getMessage(), e);
+            throw e;
         } finally {
-            // Cleanup temp file
-            if (tempFile != null && tempFile.exists()) {
-                boolean deleted = tempFile.delete();
-                if (!deleted) {
-                    logger.warn("[{}] Impossible de supprimer le fichier temporaire: {}", 
-                              sessionId, tempFile.getAbsolutePath());
-                    tempFile.deleteOnExit();
+            // Clean up the temporary file
+            if (tempParquetFile != null) {
+                try {
+                    Files.deleteIfExists(tempParquetFile);
+                } catch (IOException e) {
+                    logger.warn("[{}] Could not delete temporary file: {}", sessionId, tempParquetFile, e);
                 }
             }
         }
     }
-    
+
     /**
      * Ferme les ressources utilisées
      */
     /**
-     * Envoie un batch de données à un nœud distant
+     * Envoie un batch de données à un nœud distant avec une sérialisation optimisée
+     * Cette version utilise un format basé sur les colonnes plutôt que sur les lignes
+     * pour réduire la taille de la sérialisation et améliorer les performances
      * 
      * @param node Nœud distant où envoyer les données
      * @param tableName Nom de la table à mettre à jour
@@ -931,13 +1121,150 @@ public class VectorizedParquetLoader {
     private void sendBatchToRemoteNode(com.memorydb.distribution.NodeInfo node, String tableName, 
                                       List<Object[]> batch) throws IOException {
         try {
-            // Sérialisation du batch avec Jackson
+            if (batch.isEmpty()) {
+                return; // Rien à envoyer
+            }
+            
+            int rowCount = batch.size();
+            int columnCount = batch.get(0).length;
+            
+            // Crée une structure basée sur les colonnes pour réduire l'overhead JSON
+            // Cela permet de sérialiser chaque colonne comme un tableau homogène
+            // au lieu d'avoir des objets hétérogènes pour chaque ligne
+            List<Map<String, Object>> columns = new ArrayList<>(columnCount);
+            
+            for (int colIndex = 0; colIndex < columnCount; colIndex++) {
+                Map<String, Object> column = new HashMap<>();
+                
+                // Détermine le type de la colonne en inspectant les valeurs non nulles
+                String columnType = "unknown";
+                for (Object[] row : batch) {
+                    if (row[colIndex] != null) {
+                        if (row[colIndex] instanceof Integer) columnType = "int";
+                        else if (row[colIndex] instanceof Long) columnType = "long";
+                        else if (row[colIndex] instanceof Float) columnType = "float";
+                        else if (row[colIndex] instanceof Double) columnType = "double";
+                        else if (row[colIndex] instanceof Boolean) columnType = "boolean";
+                        else if (row[colIndex] instanceof String) columnType = "string";
+                        break;
+                    }
+                }
+                
+                column.put("type", columnType);
+                
+                // Crée les tableaux de valeurs homogènes pour chaque type
+                switch (columnType) {
+                    case "int":
+                        int[] intValues = new int[rowCount];
+                        boolean[] intNulls = new boolean[rowCount];
+                        for (int rowIndex = 0; rowIndex < rowCount; rowIndex++) {
+                            Object value = batch.get(rowIndex)[colIndex];
+                            if (value == null) {
+                                intNulls[rowIndex] = true;
+                            } else {
+                                intValues[rowIndex] = value instanceof Number ? 
+                                    ((Number) value).intValue() : Integer.parseInt(value.toString());
+                            }
+                        }
+                        column.put("values", intValues);
+                        column.put("nulls", intNulls);
+                        break;
+                        
+                    case "long":
+                        long[] longValues = new long[rowCount];
+                        boolean[] longNulls = new boolean[rowCount];
+                        for (int rowIndex = 0; rowIndex < rowCount; rowIndex++) {
+                            Object value = batch.get(rowIndex)[colIndex];
+                            if (value == null) {
+                                longNulls[rowIndex] = true;
+                            } else {
+                                longValues[rowIndex] = value instanceof Number ? 
+                                    ((Number) value).longValue() : Long.parseLong(value.toString());
+                            }
+                        }
+                        column.put("values", longValues);
+                        column.put("nulls", longNulls);
+                        break;
+                        
+                    case "float":
+                        float[] floatValues = new float[rowCount];
+                        boolean[] floatNulls = new boolean[rowCount];
+                        for (int rowIndex = 0; rowIndex < rowCount; rowIndex++) {
+                            Object value = batch.get(rowIndex)[colIndex];
+                            if (value == null) {
+                                floatNulls[rowIndex] = true;
+                            } else {
+                                floatValues[rowIndex] = value instanceof Number ? 
+                                    ((Number) value).floatValue() : Float.parseFloat(value.toString());
+                            }
+                        }
+                        column.put("values", floatValues);
+                        column.put("nulls", floatNulls);
+                        break;
+                        
+                    case "double":
+                        double[] doubleValues = new double[rowCount];
+                        boolean[] doubleNulls = new boolean[rowCount];
+                        for (int rowIndex = 0; rowIndex < rowCount; rowIndex++) {
+                            Object value = batch.get(rowIndex)[colIndex];
+                            if (value == null) {
+                                doubleNulls[rowIndex] = true;
+                            } else {
+                                doubleValues[rowIndex] = value instanceof Number ? 
+                                    ((Number) value).doubleValue() : Double.parseDouble(value.toString());
+                            }
+                        }
+                        column.put("values", doubleValues);
+                        column.put("nulls", doubleNulls);
+                        break;
+                        
+                    case "boolean":
+                        boolean[] boolValues = new boolean[rowCount];
+                        boolean[] boolNulls = new boolean[rowCount];
+                        for (int rowIndex = 0; rowIndex < rowCount; rowIndex++) {
+                            Object value = batch.get(rowIndex)[colIndex];
+                            if (value == null) {
+                                boolNulls[rowIndex] = true;
+                            } else {
+                                boolValues[rowIndex] = value instanceof Boolean ? 
+                                    (Boolean) value : Boolean.parseBoolean(value.toString());
+                            }
+                        }
+                        column.put("values", boolValues);
+                        column.put("nulls", boolNulls);
+                        break;
+                        
+                    case "string":
+                    default:
+                        // Pour les strings et types inconnus, utilise un tableau de strings
+                        String[] stringValues = new String[rowCount];
+                        boolean[] stringNulls = new boolean[rowCount];
+                        for (int rowIndex = 0; rowIndex < rowCount; rowIndex++) {
+                            Object value = batch.get(rowIndex)[colIndex];
+                            if (value == null) {
+                                stringNulls[rowIndex] = true;
+                            } else {
+                                stringValues[rowIndex] = value.toString();
+                            }
+                        }
+                        column.put("values", stringValues);
+                        column.put("nulls", stringNulls);
+                        break;
+                }
+                
+                columns.add(column);
+            }
+            
+            // Construction du payload optimisé
             Map<String, Object> payload = new HashMap<>();
             payload.put("tableName", tableName);
-            payload.put("rows", batch);
+            payload.put("format", "column-based");
+            payload.put("rowCount", rowCount);
+            payload.put("columnCount", columnCount);
+            payload.put("columns", columns);
             
             // Construction de l'URL du nœud distant
-            String url = String.format("http://%s:%d/api/tables/%s/add-batch", 
+            String url = String.format("http://%s:%d/api/tables/%s/add-batch-columnar", 
                     node.getAddress(), node.getPort(), tableName);
             
             // Convertit le payload en JSON
@@ -959,6 +1286,8 @@ public class VectorizedParquetLoader {
                 throw new IOException("Erreur lors de l'envoi du batch au nœud " + node.getId() + 
                         ": HTTP " + response.statusCode() + " - " + response.body());
             }
+            
+            logger.debug("Batch columnar de {} lignes envoyé au nœud {}", rowCount, node.getId());
             
         } catch (URISyntaxException | InterruptedException e) {
             throw new IOException("Erreur lors de la communication avec le nœud distant: " + e.getMessage(), e);

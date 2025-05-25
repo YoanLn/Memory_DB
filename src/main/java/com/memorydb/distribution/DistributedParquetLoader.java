@@ -219,24 +219,57 @@ public class DistributedParquetLoader {
      */
     public Map<String, Long> loadDistributedFromStream(String tableName, InputStream inputStream, 
                                                      ParquetLoadOptions options) throws IOException {
-        // Obtient les nœuds du cluster
-        Collection<NodeInfo> nodes = clusterManager.getAllNodes();
-        Map<String, Long> resultMap = new HashMap<>();
+        // Récupère les informations de configuration du cluster
         String sessionId = java.util.UUID.randomUUID().toString();
+        logger.info("[{}] Début du chargement en streaming distribué pour la table {}", sessionId, tableName);
         
-        // Initialise les résultats à 0 pour tous les nœuds
+        // Détermine les nœuds attendus à partir de la configuration
+        String clusterNodesConfig = System.getProperty("memorydb.cluster.nodes", "");
+        boolean isClusterEnabled = Boolean.parseBoolean(System.getProperty("memorydb.cluster.enabled", "false"));
+        int expectedNodeCount = 1; // Par défaut, on attend un seul nœud
+        
+        if (isClusterEnabled && !clusterNodesConfig.isEmpty()) {
+            // Compte le nombre de nœuds configurés
+            String[] configuredNodes = clusterNodesConfig.split(",");
+            expectedNodeCount = configuredNodes.length;
+            logger.info("[{}] Configuration cluster détectée avec {} nœuds attendus: {}", 
+                    sessionId, expectedNodeCount, clusterNodesConfig);
+        }
+        
+        // Attend que tous les nœuds soient connectés (max 10 secondes)
+        Collection<NodeInfo> nodes = clusterManager.getAllNodes();
+        int waitCount = 0;
+        int maxWaitCycles = 20; // 20 * 500ms = 10 secondes max
+        
+        while (nodes.size() < expectedNodeCount && waitCount < maxWaitCycles) {
+            logger.info("[{}] En attente des nœuds ({} sur {} connectés) - tentative {}/{}", 
+                    sessionId, nodes.size(), expectedNodeCount, waitCount+1, maxWaitCycles);
+            try {
+                Thread.sleep(500); // Attend 500ms
+                waitCount++;
+                nodes = clusterManager.getAllNodes(); // Actualise la liste des nœuds
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                logger.warn("[{}] Interruption pendant l'attente des nœuds", sessionId);
+                break;
+            }
+        }
+        
+        // Initialise le résultat pour chaque nœud
+        Map<String, Long> resultMap = new HashMap<>();
         for (NodeInfo node : nodes) {
             resultMap.put(node.getId(), 0L);
         }
         
-        logger.info("[{}] Début du chargement en streaming distribué pour la table {}", sessionId, tableName);
-        
-        // Si un seul nœud, pas besoin de distribution
+        // Vérifie si le mode distribué est possible
         if (nodes.size() <= 1) {
-            logger.info("[{}] Mode distribué ignoré - un seul nœud disponible", sessionId);
+            logger.info("[{}] Mode distribué ignoré - seul {} nœud(s) disponible(s) après attente", 
+                    sessionId, nodes.size());
             ParquetLoadStats stats = parquetLoader.loadParquetFileFromStream(tableName, inputStream, options);
             resultMap.put(clusterManager.getLocalNode().getId(), stats.getRowsProcessed());
             return resultMap;
+        } else {
+            logger.info("[{}] Mode distribué activé avec {} nœuds", sessionId, nodes.size());
         }
         
         // Calcul de la taille totale approximative des données

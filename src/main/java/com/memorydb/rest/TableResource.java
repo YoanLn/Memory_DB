@@ -1445,4 +1445,198 @@ public class TableResource {
                     .build();
         }
     }
+    
+    /**
+     * Reçoit un batch de données d'un autre nœud au format colonne et l'ajoute à la table locale
+     * Ce format est optimisé pour réduire l'usage mémoire et la taille des données sérialisées
+     * 
+     * @param tableName Le nom de la table à mettre à jour
+     * @param batchData Les données du batch au format JSON organisé par colonnes
+     * @return Réponse HTTP indiquant le statut de l'opération
+     */
+    @POST
+    @Path("/{tableName}/add-batch-columnar")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response addBatchColumnarFromRemoteNode(
+            @PathParam("tableName") String tableName,
+            Map<String, Object> batchData) {
+        
+        try {
+            // Vérifie que la table existe
+            if (!databaseContext.tableExists(tableName)) {
+                return Response.status(Response.Status.NOT_FOUND)
+                        .entity(Map.of("error", "Table inconnue: " + tableName))
+                        .build();
+            }
+            
+            // Vérifie le format des données
+            if (!"column-based".equals(batchData.get("format"))) {
+                return Response.status(Response.Status.BAD_REQUEST)
+                        .entity(Map.of("error", "Format de données non pris en charge. Format 'column-based' requis."))
+                        .build();
+            }
+            
+            // Récupère les informations du batch
+            int rowCount = ((Number) batchData.get("rowCount")).intValue();
+            int columnCount = ((Number) batchData.get("columnCount")).intValue();
+            
+            // Suppression sécurisée - nous vérifions le contenu après la conversion
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> columns = (List<Map<String, Object>>) batchData.get("columns");
+            
+            if (columns == null || columns.isEmpty() || columns.size() != columnCount) {
+                return Response.status(Response.Status.BAD_REQUEST)
+                        .entity(Map.of("error", "Données de batch invalides: colonnes manquantes ou nombre incorrect"))
+                        .build();
+            }
+            
+            Table table = databaseContext.getTable(tableName);
+            TableData tableData = databaseContext.getTableData(tableName);
+            
+            // Vérifie que le nombre de colonnes correspond à la table
+            if (columnCount != table.getColumns().size()) {
+                return Response.status(Response.Status.BAD_REQUEST)
+                        .entity(Map.of("error", "Nombre de colonnes incorrect. Attendu: " + table.getColumns().size() + 
+                                 ", Reçu: " + columnCount))
+                        .build();
+            }
+            
+            // Traitement optimisé par colonne pour réduire les allocations
+            tableData.writeLock();
+            try {
+                for (int rowIndex = 0; rowIndex < rowCount; rowIndex++) {
+                    // Traitement efficace ligne par ligne pour éviter la création d'objets temporaires
+                    for (int colIndex = 0; colIndex < columnCount; colIndex++) {
+                        Map<String, Object> columnData = columns.get(colIndex);
+                        String columnType = (String) columnData.get("type");
+                        
+                        // Conversion sécurisée des tableaux JSON désérialisés (ArrayList) en tableaux primitifs
+                        Object nullsObj = columnData.get("nulls");
+                        boolean isNull = false;
+                        
+                        if (nullsObj instanceof boolean[]) {
+                            // Déjà un tableau de booléens
+                            boolean[] nulls = (boolean[]) nullsObj;
+                            isNull = nulls[rowIndex];
+                        } else if (nullsObj instanceof List) {
+                            // Convertir ArrayList en booléens
+                            List<?> nullsList = (List<?>) nullsObj;
+                            isNull = Boolean.TRUE.equals(nullsList.get(rowIndex));
+                        }
+                        
+                        if (isNull) {
+                            tableData.getColumnStore(colIndex).addNull();
+                            continue;
+                        }
+                        
+                        // Optimisation: accès direct aux tableaux de valeurs primitives
+                        // avec gestion sécurisée de la désérialisation JSON
+                        switch (columnType) {
+                            case "int":
+                                Object intObj = columnData.get("values");
+                                if (intObj instanceof int[]) {
+                                    int[] intValues = (int[]) intObj;
+                                    tableData.getColumnStore(colIndex).addInt(intValues[rowIndex]);
+                                } else if (intObj instanceof List) {
+                                    List<?> intList = (List<?>) intObj;
+                                    Object value = intList.get(rowIndex);
+                                    tableData.getColumnStore(colIndex).addInt(value instanceof Number ? 
+                                        ((Number) value).intValue() : Integer.parseInt(value.toString()));
+                                }
+                                break;
+                                
+                            case "long":
+                                Object longObj = columnData.get("values");
+                                if (longObj instanceof long[]) {
+                                    long[] longValues = (long[]) longObj;
+                                    tableData.getColumnStore(colIndex).addLong(longValues[rowIndex]);
+                                } else if (longObj instanceof List) {
+                                    List<?> longList = (List<?>) longObj;
+                                    Object value = longList.get(rowIndex);
+                                    tableData.getColumnStore(colIndex).addLong(value instanceof Number ? 
+                                        ((Number) value).longValue() : Long.parseLong(value.toString()));
+                                }
+                                break;
+                                
+                            case "float":
+                                Object floatObj = columnData.get("values");
+                                if (floatObj instanceof float[]) {
+                                    float[] floatValues = (float[]) floatObj;
+                                    tableData.getColumnStore(colIndex).addFloat(floatValues[rowIndex]);
+                                } else if (floatObj instanceof List) {
+                                    List<?> floatList = (List<?>) floatObj;
+                                    Object value = floatList.get(rowIndex);
+                                    tableData.getColumnStore(colIndex).addFloat(value instanceof Number ? 
+                                        ((Number) value).floatValue() : Float.parseFloat(value.toString()));
+                                }
+                                break;
+                                
+                            case "double":
+                                Object doubleObj = columnData.get("values");
+                                if (doubleObj instanceof double[]) {
+                                    double[] doubleValues = (double[]) doubleObj;
+                                    tableData.getColumnStore(colIndex).addDouble(doubleValues[rowIndex]);
+                                } else if (doubleObj instanceof List) {
+                                    List<?> doubleList = (List<?>) doubleObj;
+                                    Object value = doubleList.get(rowIndex);
+                                    tableData.getColumnStore(colIndex).addDouble(value instanceof Number ? 
+                                        ((Number) value).doubleValue() : Double.parseDouble(value.toString()));
+                                }
+                                break;
+                                
+                            case "boolean":
+                                Object boolObj = columnData.get("values");
+                                if (boolObj instanceof boolean[]) {
+                                    boolean[] boolValues = (boolean[]) boolObj;
+                                    tableData.getColumnStore(colIndex).addBoolean(boolValues[rowIndex]);
+                                } else if (boolObj instanceof List) {
+                                    List<?> boolList = (List<?>) boolObj;
+                                    Object value = boolList.get(rowIndex);
+                                    tableData.getColumnStore(colIndex).addBoolean(value instanceof Boolean ? 
+                                        (Boolean) value : Boolean.parseBoolean(value.toString()));
+                                }
+                                break;
+                                
+                            case "string":
+                            default:
+                                Object stringObj = columnData.get("values");
+                                if (stringObj instanceof String[]) {
+                                    String[] stringValues = (String[]) stringObj;
+                                    // Optimisation: interning des chaînes pour réduire l'usage mémoire
+                                    tableData.getColumnStore(colIndex).addString(stringValues[rowIndex] != null ? 
+                                                                                stringValues[rowIndex].intern() : null);
+                                } else if (stringObj instanceof List) {
+                                    List<?> stringList = (List<?>) stringObj;
+                                    Object value = stringList.get(rowIndex);
+                                    // Optimisation: interning des chaînes pour réduire l'usage mémoire
+                                    tableData.getColumnStore(colIndex).addString(value != null ? 
+                                                                                value.toString().intern() : null);
+                                }
+                                break;
+                        }
+                    }
+                    
+                    // Incrémente le compteur de lignes sans créer de tableau temporaire
+                    tableData.incrementRowCount();
+                }
+                
+                logger.info("[Remote Batch Columnar] Ajout de {} lignes à la table {}", rowCount, tableName);
+                
+                return Response.ok(Map.of(
+                        "tableName", tableName,
+                        "rowsAdded", rowCount,
+                        "status", "success",
+                        "format", "columnar"
+                )).build();
+            } finally {
+                tableData.writeUnlock();
+            }
+        } catch (Exception e) {
+            logger.error("Erreur lors de l'ajout du batch columnar distant: {}", e.getMessage(), e);
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+                    .entity(Map.of("error", "Erreur lors de l'ajout du batch columnar: " + e.getMessage()))
+                    .build();
+        }
+    }
 }

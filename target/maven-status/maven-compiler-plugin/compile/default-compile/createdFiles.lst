@@ -28,6 +28,7 @@ com/memorydb/ApplicationLifecycle.class
 com/memorydb/rest/dto/OrderByDto.class
 com/memorydb/parquet/VectorizedParquetLoader$1.class
 com/memorydb/rest/QueryResource.class
+com/memorydb/parquet/ParquetByteBufferInputFile$ByteBufferSeekableInputStream.class
 com/memorydb/storage/TableData$1.class
 com/memorydb/query/Query.class
 com/memorydb/distribution/DistributedParquetLoader.class
@@ -58,11 +59,13 @@ com/memorydb/query/QueryExecutor$GroupKey.class
 com/memorydb/distribution/ClusterManager$1.class
 com/memorydb/rest/ExportResource.class
 com/memorydb/distribution/NodeStatus.class
+com/memorydb/parquet/VectorizedParquetLoader$ValueCache.class
 com/memorydb/query/ConditionType.class
 com/memorydb/query/SQLParser.class
 com/memorydb/distribution/NodeClient$2.class
 com/memorydb/index/BitmapIndex.class
 com/memorydb/distribution/NodeClient$8.class
+com/memorydb/parquet/ParquetByteBufferInputFile.class
 com/memorydb/query/Condition$Operator.class
 com/memorydb/storage/ColumnStore$1.class
 com/memorydb/query/Condition$1.class
