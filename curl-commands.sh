@@ -56,7 +56,6 @@ list_tables() {
   curl --noproxy localhost -s http://$NODE3/api/tables | jq '.'
 }
 
-
 # Chargement distribué - Petit nombre de lignes (test)
 load_distributed_small() {
   echo "Chargement distribué avec un petit nombre de lignes (3)..."
@@ -92,7 +91,7 @@ count_parquet_rows() {
   echo "Note: Pour les chargements distribués, définir rowLimit à 20M au lieu de 30M est plus approprié pour éviter les problèmes de distribution."
 }
 
-# Chargement optimisé pour les environnements universitaires (proxy, quota disque limité)
+# Chargement binaire optimisé pour les environnements universitaires (proxy, quota disque limité)
 load_binary() {
   local host=${1:-$NODE1}
   local row_limit=${2:-"3"}
@@ -116,9 +115,6 @@ load_binary() {
   echo "Envoi du fichier: $file ($(du -h "$file" | cut -f1))"
   
   # Utilisation du mode binaire direct sans proxy et sans écriture sur disque
-  # --data-binary envoie le fichier directement sans conversion
-  # Ne pas utiliser -F qui crée un multipart/form-data et des fichiers temporaires
-  # -v pour obtenir des détails sur l'avancement et la réponse
   curl -v --noproxy '*' \
     -X POST \
     -H "Content-Type: application/octet-stream" \
@@ -184,8 +180,6 @@ load_distributed_full() {
     -F "skipRows=0" \
     http://$NODE1/api/tables/parquet_file/load-distributed-upload
 }
-
-
 
 # Vérifier les statistiques de la table
 check_stats() {
@@ -350,431 +344,561 @@ check_health() {
     http://$NODE1/api/cluster/health | jq '.'
 }
 
-# Requêtes intelligentes pour l'analyse des données de taxi NYC
+# ========================================
+# REQUÊTES ANALYTIQUES BUSINESS INTELLIGENCE
+# ========================================
 
-# 1. Analyse des vendeurs (compagnies de taxi)
-query_vendor_analysis() {
-  echo "=== ANALYSE DES VENDEURS DE TAXI ==="
+# 📊 Vue d'Ensemble Globale - Statistiques générales du cluster entier
+analytics_overview() {
+  echo "📊 VUE D'ENSEMBLE GLOBALE - Statistiques consolidées de tout le cluster"
+  echo "Agrégation globale sans GROUP BY pour avoir les totaux du cluster..."
+  
+  curl --noproxy localhost -X POST -H "Content-Type: application/json" \
+    -d '{
+      "tableName": "parquet_file",
+      "columns": [],
+      "aggregates": {
+        "COUNT_STAR": "COUNT",
+        "AVG_fare_amount": "AVG",
+        "SUM_total_amount": "SUM",
+        "AVG_trip_distance": "AVG",
+        "MAX_fare_amount": "MAX",
+        "MIN_fare_amount": "MIN",
+        "AVG_tip_amount": "AVG",
+        "SUM_tip_amount": "SUM"
+      },
+      "distributed": true
+    }' \
+    http://$NODE1/api/query | jq '.'
+}
+
+# 📋 Échantillon de Données Brutes - Toutes les colonnes sans agrégation
+analytics_sample_data() {
+  echo "📋 ÉCHANTILLON DE DONNÉES BRUTES - Toutes les colonnes, 100 premières lignes"
+  echo "Affichage des données brutes pour voir la structure complète..."
+  
+  curl --noproxy localhost -X POST -H "Content-Type: application/json" \
+    -d '{
+      "tableName": "parquet_file",
+      "columns": ["*"],
+      "conditions": [
+        {"columnName": "fare_amount", "operator": "GREATER_THAN", "value": 5}
+      ],
+      "orderBy": [{"column": "total_amount", "ascending": false}],
+      "limit": 100,
+      "distributed": true
+    }' \
+    http://$NODE1/api/query | jq '.'
+}
+
+# 💰 Trajets les Plus Chers - WHERE total_amount > 100 ORDER BY total_amount DESC
+analytics_expensive_trips() {
+  echo "💰 TRAJETS LES PLUS CHERS - Trajets > 100$ triés par montant décroissant"
+  echo "Exécution de la requête des trajets les plus chers..."
+  
+  curl --noproxy localhost -X POST -H "Content-Type: application/json" \
+    -d '{
+      "tableName": "parquet_file",
+      "columns": ["VendorID", "passenger_count", "trip_distance", "fare_amount", "tip_amount", "total_amount", "PULocationID", "DOLocationID"],
+      "conditions": [
+        {"columnName": "total_amount", "operator": "GREATER_THAN", "value": 50}
+      ],
+      "orderBy": [{"column": "total_amount", "ascending": false}],
+      "distributed": true
+    }' \
+    http://$NODE1/api/query | jq '.'
+}
+
+# 🚕 Performance des Vendeurs - GROUP BY VendorID avec HAVING pour filtrer les vendeurs performants
+analytics_vendor_performance() {
+  echo "🚕 PERFORMANCE DES VENDEURS - Vendeurs avec >1000 trajets et revenus moyens >15$"
+  echo "Utilisation de HAVING pour filtrer les vendeurs performants..."
+  
   curl --noproxy localhost -X POST -H "Content-Type: application/json" \
     -d '{
       "tableName": "parquet_file",
       "columns": ["VendorID"],
+      "conditions": [
+        {"columnName": "VendorID", "operator": "IN", "value": [1, 2, 3, 4, 5]}
+      ],
+      "groupBy": ["VendorID"],
+      "aggregates": {
+        "COUNT_STAR": "COUNT",
+        "SUM_total_amount": "SUM",
+        "AVG_fare_amount": "AVG",
+        "AVG_tip_amount": "AVG",
+        "AVG_trip_distance": "AVG"
+      },
+      "havingConditions": [
+        {"columnName": "COUNT_STAR", "operator": "GREATER_THAN", "value": 1000},
+        {"columnName": "AVG_fare_amount", "operator": "GREATER_THAN", "value": 15}
+      ],
+      "orderBy": [{"column": "SUM_total_amount", "ascending": false}],
+      "distributed": true
+    }' \
+    http://$NODE1/api/query | jq '.'
+}
+
+# 📍 Top Zones de Pickup - Zones premium avec HAVING et BETWEEN pour filtrer les zones rentables
+analytics_pickup_zones() {
+  echo "📍 TOP ZONES DE PICKUP PREMIUM - Zones avec >500 trajets et revenus moyens entre 20-100$"
+  echo "Utilisation de HAVING et BETWEEN pour identifier les zones premium..."
+  
+  curl --noproxy localhost -X POST -H "Content-Type: application/json" \
+    -d '{
+      "tableName": "parquet_file",
+      "columns": ["PULocationID"],
+      "conditions": [
+        {"columnName": "PULocationID", "operator": "IS_NOT_NULL"},
+        {"columnName": "PULocationID", "operator": "BETWEEN", "value": [1, 300]}
+      ],
+      "groupBy": ["PULocationID"],
+      "aggregates": {
+        "COUNT_STAR": "COUNT",
+        "SUM_total_amount": "SUM",
+        "AVG_fare_amount": "AVG",
+        "AVG_trip_distance": "AVG",
+        "MAX_fare_amount": "MAX"
+      },
+      "havingConditions": [
+        {"columnName": "COUNT_STAR", "operator": "GREATER_THAN", "value": 500},
+        {"columnName": "AVG_fare_amount", "operator": "BETWEEN", "value": [20, 100]}
+      ],
+      "orderBy": [{"column": "SUM_total_amount", "ascending": false}],
+      "distributed": true
+    }' \
+    http://$NODE1/api/query | jq '.'
+}
+
+# 💳 Analyse Paiements Premium - Types de paiement avec HAVING pour identifier les segments rentables
+analytics_payment_analysis() {
+  echo "💳 ANALYSE PAIEMENTS PREMIUM - Types avec >10000 transactions et pourboires moyens >2$"
+  echo "Utilisation de HAVING et IN pour analyser les segments de paiement rentables..."
+  
+  curl --noproxy localhost -X POST -H "Content-Type: application/json" \
+    -d '{
+      "tableName": "parquet_file",
+      "columns": ["payment_type"],
+      "conditions": [
+        {"columnName": "payment_type", "operator": "IN", "value": [1, 2, 3, 4, 5]},
+        {"columnName": "tip_amount", "operator": "GREATER_THAN_OR_EQUALS", "value": 0}
+      ],
+      "groupBy": ["payment_type"],
+      "aggregates": {
+        "COUNT_STAR": "COUNT",
+        "SUM_total_amount": "SUM",
+        "AVG_fare_amount": "AVG",
+        "AVG_tip_amount": "AVG",
+        "SUM_tip_amount": "SUM"
+      },
+      "havingConditions": [
+        {"columnName": "COUNT_STAR", "operator": "GREATER_THAN", "value": 10000},
+        {"columnName": "AVG_tip_amount", "operator": "GREATER_THAN", "value": 2}
+      ],
+      "orderBy": [{"column": "SUM_total_amount", "ascending": false}],
+      "distributed": true
+    }' \
+    http://$NODE1/api/query | jq '.'
+}
+
+# 👥 Analyse Groupes Rentables - Groupes de passagers avec HAVING et BETWEEN pour identifier les segments premium
+analytics_passenger_analysis() {
+  echo "👥 ANALYSE GROUPES RENTABLES - Groupes avec >5000 trajets et revenus moyens >25$"
+  echo "Utilisation de BETWEEN et HAVING pour identifier les groupes de passagers premium..."
+  
+  curl --noproxy localhost -X POST -H "Content-Type: application/json" \
+    -d '{
+      "tableName": "parquet_file",
+      "columns": ["passenger_count"],
+      "conditions": [
+        {"columnName": "passenger_count", "operator": "BETWEEN", "value": [1, 6]},
+        {"columnName": "fare_amount", "operator": "GREATER_THAN", "value": 5}
+      ],
+      "groupBy": ["passenger_count"],
+      "aggregates": {
+        "COUNT_STAR": "COUNT",
+        "AVG_fare_amount": "AVG",
+        "AVG_tip_amount": "AVG",
+        "SUM_total_amount": "SUM",
+        "AVG_trip_distance": "AVG"
+      },
+      "havingConditions": [
+        {"columnName": "COUNT_STAR", "operator": "GREATER_THAN", "value": 5000},
+        {"columnName": "AVG_fare_amount", "operator": "GREATER_THAN", "value": 25}
+      ],
+      "orderBy": [{"column": "AVG_fare_amount", "ascending": false}],
+      "distributed": true
+    }' \
+    http://$NODE1/api/query | jq '.'
+}
+
+# 📏 Analyse Trajets Longue Distance - Trajets premium avec HAVING pour identifier les routes rentables
+analytics_distance_analysis() {
+  echo "📏 ANALYSE TRAJETS LONGUE DISTANCE - Routes avec >100 trajets et tarifs moyens >30$"
+  echo "Utilisation de BETWEEN et HAVING pour analyser les trajets longue distance rentables..."
+  
+  curl --noproxy localhost -X POST -H "Content-Type: application/json" \
+    -d '{
+      "tableName": "parquet_file",
+      "columns": ["VendorID"],
+      "conditions": [
+        {"columnName": "trip_distance", "operator": "BETWEEN", "value": [5, 50]},
+        {"columnName": "fare_amount", "operator": "GREATER_THAN", "value": 10},
+        {"columnName": "VendorID", "operator": "IN", "value": [1, 2, 3, 4]}
+      ],
       "groupBy": ["VendorID"],
       "aggregates": {
         "total_trips": "COUNT",
         "avg_fare": "AVG",
         "total_revenue": "SUM",
-        "max_fare": "MAX",
-        "min_fare": "MIN"
+        "avg_distance": "AVG",
+        "fare_per_mile": "AVG",
+        "max_distance": "MAX"
       },
       "aggregateColumns": {
         "avg_fare": "fare_amount",
         "total_revenue": "total_amount",
-        "max_fare": "fare_amount",
-        "min_fare": "fare_amount"
-      },
-      "distributed": true,
-      "limit": 10
-    }' \
-    http://$NODE1/api/query | jq '.'
-}
-
-# 2. Analyse des zones de pickup les plus populaires
-query_popular_pickup_zones() {
-  echo "=== ZONES DE PICKUP LES PLUS POPULAIRES ==="
-  curl --noproxy localhost -X POST -H "Content-Type: application/json" \
-    -d '{
-      "tableName": "parquet_file",
-      "columns": ["PULocationID"],
-      "groupBy": ["PULocationID"],
-      "aggregates": {
-        "trip_count": "COUNT",
-        "avg_distance": "AVG",
-        "avg_fare": "AVG",
-        "total_revenue": "SUM"
-      },
-      "aggregateColumns": {
         "avg_distance": "trip_distance",
-        "avg_fare": "fare_amount",
-        "total_revenue": "total_amount"
+        "fare_per_mile": "fare_amount",
+        "max_distance": "trip_distance"
       },
-      "orderBy": [{"column": "trip_count", "ascending": false}],
-      "distributed": true,
-      "limit": 20
+      "havingConditions": [
+        {"columnName": "total_trips", "operator": "GREATER_THAN", "value": 100},
+        {"columnName": "avg_fare", "operator": "GREATER_THAN", "value": 30},
+        {"columnName": "avg_distance", "operator": "GREATER_THAN", "value": 8}
+      ],
+      "orderBy": [{"column": "fare_per_mile", "ascending": false}],
+      "distributed": true
     }' \
     http://$NODE1/api/query | jq '.'
 }
 
-# 3. Analyse des types de paiement
-query_payment_analysis() {
-  echo "=== ANALYSE DES TYPES DE PAIEMENT ==="
+# 🏆 Analyse Segments VIP - Combinaison avancée de tous les nouveaux opérateurs SQL
+analytics_vip_segments() {
+  echo "🏆 ANALYSE SEGMENTS VIP - Zones premium avec opérateurs SQL avancés"
+  echo "Utilisation de IN, BETWEEN, HAVING pour identifier les segments VIP ultra-rentables..."
+  
   curl --noproxy localhost -X POST -H "Content-Type: application/json" \
     -d '{
       "tableName": "parquet_file",
-      "columns": ["payment_type"],
-      "groupBy": ["payment_type"],
+      "columns": ["PULocationID", "payment_type"],
+      "conditions": [
+        {"columnName": "PULocationID", "operator": "IN", "value": [1, 4, 7, 13, 48, 50, 68, 79, 87, 90, 100, 107, 113, 114, 125, 127, 128, 140, 141, 142, 148, 151, 152, 158, 161, 162, 163, 164, 166, 170, 186, 194, 202, 209, 211, 224, 229, 230, 231, 232, 233, 234, 236, 237, 238, 239, 243, 244, 246, 249, 261, 262, 263]},
+        {"columnName": "payment_type", "operator": "IN", "value": [1, 2]},
+        {"columnName": "fare_amount", "operator": "BETWEEN", "value": [15, 200]},
+        {"columnName": "tip_amount", "operator": "GREATER_THAN", "value": 3},
+        {"columnName": "passenger_count", "operator": "BETWEEN", "value": [1, 4]}
+      ],
+      "groupBy": ["PULocationID", "payment_type"],
       "aggregates": {
-        "transaction_count": "COUNT",
-        "avg_tip": "AVG",
-        "total_tips": "SUM",
-        "avg_total": "AVG"
+        "vip_trips": "COUNT",
+        "total_vip_revenue": "SUM",
+        "avg_vip_fare": "AVG",
+        "avg_vip_tip": "AVG",
+        "avg_vip_distance": "AVG",
+        "vip_tip_ratio": "AVG"
       },
       "aggregateColumns": {
-        "avg_tip": "tip_amount",
-        "total_tips": "tip_amount",
-        "avg_total": "total_amount"
+        "total_vip_revenue": "total_amount",
+        "avg_vip_fare": "fare_amount",
+        "avg_vip_tip": "tip_amount",
+        "avg_vip_distance": "trip_distance",
+        "vip_tip_ratio": "tip_amount"
       },
-      "distributed": true,
-      "limit": 10
+      "havingConditions": [
+        {"columnName": "vip_trips", "operator": "GREATER_THAN", "value": 200},
+        {"columnName": "avg_vip_fare", "operator": "BETWEEN", "value": [25, 150]},
+        {"columnName": "avg_vip_tip", "operator": "GREATER_THAN", "value": 5},
+        {"columnName": "total_vip_revenue", "operator": "GREATER_THAN", "value": 10000}
+      ],
+      "orderBy": [{"column": "total_vip_revenue", "ascending": false}],
+      "limit": 20,
+      "distributed": true
     }' \
     http://$NODE1/api/query | jq '.'
 }
 
-# 4. Analyse des distances de voyage
-query_distance_analysis() {
-  echo "=== ANALYSE DES DISTANCES DE VOYAGE ==="
+# ⚡ Benchmark de Performance - Test sur l'ensemble des données
+analytics_performance_benchmark() {
+  echo "⚡ BENCHMARK DE PERFORMANCE - Test sur l'ensemble des données"
+  echo "Exécution du benchmark de performance..."
+  
   curl --noproxy localhost -X POST -H "Content-Type: application/json" \
     -d '{
       "tableName": "parquet_file",
       "columns": ["*"],
       "conditions": [
-        {"column": "trip_distance", "operator": "GREATER_THAN", "value": 0},
-        {"column": "trip_distance", "operator": "LESS_THAN", "value": 100}
+        {"columnName": "trip_distance", "operator": "GREATER_THAN", "value": 0},
+        {"columnName": "fare_amount", "operator": "GREATER_THAN", "value": 0}
       ],
       "aggregates": {
         "total_trips": "COUNT",
         "avg_distance": "AVG",
         "max_distance": "MAX",
-        "min_distance": "MIN",
-        "avg_fare_per_mile": "AVG"
+        "avg_fare_per_mile": "AVG",
+        "total_revenue": "SUM"
       },
       "aggregateColumns": {
         "avg_distance": "trip_distance",
         "max_distance": "trip_distance",
-        "min_distance": "trip_distance",
-        "avg_fare_per_mile": "fare_amount"
-      },
-      "distributed": true,
-      "limit": 1
-    }' \
-    http://$NODE1/api/query | jq '.'
-}
-
-# 5. Analyse des pourboires par nombre de passagers
-query_tip_by_passengers() {
-  echo "=== ANALYSE DES POURBOIRES PAR NOMBRE DE PASSAGERS ==="
-  curl --noproxy localhost -X POST -H "Content-Type: application/json" \
-    -d '{
-      "tableName": "parquet_file",
-      "columns": ["passenger_count"],
-      "groupBy": ["passenger_count"],
-      "conditions": [
-        {"column": "passenger_count", "operator": "GREATER_THAN", "value": 0},
-        {"column": "passenger_count", "operator": "LESS_THAN_OR_EQUALS", "value": 6}
-      ],
-      "aggregates": {
-        "trip_count": "COUNT",
-        "avg_tip": "AVG",
-        "avg_tip_percentage": "AVG",
-        "total_tips": "SUM"
-      },
-      "aggregateColumns": {
-        "avg_tip": "tip_amount",
-        "avg_tip_percentage": "tip_amount",
-        "total_tips": "tip_amount"
-      },
-      "orderBy": [{"column": "passenger_count", "ascending": true}],
-      "distributed": true,
-      "limit": 10
-    }' \
-    http://$NODE1/api/query | jq '.'
-}
-
-# 6. Analyse des trajets par code tarifaire
-query_ratecode_analysis() {
-  echo "=== ANALYSE PAR CODE TARIFAIRE ==="
-  curl --noproxy localhost -X POST -H "Content-Type: application/json" \
-    -d '{
-      "tableName": "parquet_file",
-      "columns": ["RatecodeID"],
-      "groupBy": ["RatecodeID"],
-      "aggregates": {
-        "trip_count": "COUNT",
-        "avg_fare": "AVG",
-        "avg_distance": "AVG",
-        "avg_total": "AVG"
-      },
-      "aggregateColumns": {
-        "avg_fare": "fare_amount",
-        "avg_distance": "trip_distance",
-        "avg_total": "total_amount"
-      },
-      "distributed": true,
-      "limit": 10
-    }' \
-    http://$NODE1/api/query | jq '.'
-}
-
-# 7. Analyse des trajets avec frais d'aéroport
-query_airport_fee_analysis() {
-  echo "=== ANALYSE DES FRAIS D'AÉROPORT ==="
-  curl --noproxy localhost -X POST -H "Content-Type: application/json" \
-    -d '{
-      "tableName": "parquet_file",
-      "columns": ["airport_fee"],
-      "groupBy": ["airport_fee"],
-      "aggregates": {
-        "trip_count": "COUNT",
-        "avg_total_amount": "AVG",
-        "avg_distance": "AVG"
-      },
-      "aggregateColumns": {
-        "avg_total_amount": "total_amount",
-        "avg_distance": "trip_distance"
-      },
-      "distributed": true,
-      "limit": 10
-    }' \
-    http://$NODE1/api/query | jq '.'
-}
-
-# 8. Requête complexe: Analyse croisée vendeur vs zone de pickup
-query_vendor_pickup_analysis() {
-  echo "=== ANALYSE CROISÉE VENDEUR VS ZONE DE PICKUP ==="
-  curl --noproxy localhost -X POST -H "Content-Type: application/json" \
-    -d '{
-      "tableName": "parquet_file",
-      "columns": ["VendorID", "PULocationID"],
-      "groupBy": ["VendorID", "PULocationID"],
-      "aggregates": {
-        "trip_count": "COUNT",
-        "avg_fare": "AVG",
-        "total_revenue": "SUM"
-      },
-      "aggregateColumns": {
-        "avg_fare": "fare_amount",
+        "avg_fare_per_mile": "fare_amount",
         "total_revenue": "total_amount"
       },
-      "conditions": [
-        {"column": "VendorID", "operator": "IS_NOT_NULL"},
-        {"column": "PULocationID", "operator": "IS_NOT_NULL"}
-      ],
-      "orderBy": [
-        {"column": "trip_count", "ascending": false}
-      ],
-      "distributed": true,
-      "limit": 50
+      "distributed": true
     }' \
     http://$NODE1/api/query | jq '.'
 }
 
-# 9. Requête de performance: Trajets longs vs courts
-query_trip_length_performance() {
-  echo "=== PERFORMANCE: TRAJETS LONGS VS COURTS ==="
-  echo "Trajets courts (< 2 miles):"
-  curl --noproxy localhost -X POST -H "Content-Type: application/json" \
-    -d '{
-      "tableName": "parquet_file",
-      "columns": ["*"],
-      "conditions": [
-        {"column": "trip_distance", "operator": "LESS_THAN", "value": 2},
-        {"column": "trip_distance", "operator": "GREATER_THAN", "value": 0}
-      ],
-      "aggregates": {
-        "short_trip_count": "COUNT",
-        "avg_short_fare": "AVG",
-        "avg_short_tip": "AVG"
-      },
-      "aggregateColumns": {
-        "avg_short_fare": "fare_amount",
-        "avg_short_tip": "tip_amount"
-      },
-      "distributed": true,
-      "limit": 1
-    }' \
-    http://$NODE1/api/query | jq '.'
-    
-  echo "\nTrajets longs (> 10 miles):"
-  curl --noproxy localhost -X POST -H "Content-Type: application/json" \
-    -d '{
-      "tableName": "parquet_file",
-      "columns": ["*"],
-      "conditions": [
-        {"column": "trip_distance", "operator": "GREATER_THAN", "value": 10}
-      ],
-      "aggregates": {
-        "long_trip_count": "COUNT",
-        "avg_long_fare": "AVG",
-        "avg_long_tip": "AVG"
-      },
-      "aggregateColumns": {
-        "avg_long_fare": "fare_amount",
-        "avg_long_tip": "tip_amount"
-      },
-      "distributed": true,
-      "limit": 1
-    }' \
-    http://$NODE1/api/query | jq '.'
+# ========================================
+# FONCTIONS D'AIDE ET UTILITAIRES
+# ========================================
+
+# Afficher l'aide avec toutes les commandes disponibles
+show_help() {
+  echo "=== COMMANDES MEMORYDB ==="
+  echo ""
+  echo "📋 GESTION DES TABLES:"
+  echo "  create_table          - Créer la table parquet_file"
+  echo "  list_tables          - Lister toutes les tables"
+  echo "  stats                - Afficher les statistiques"
+  echo ""
+  echo "📥 CHARGEMENT DE DONNÉES:"
+  echo "  load_binary          - Chargement binaire optimisé"
+  echo ""
+  echo "📊 REQUÊTES ANALYTIQUES AVANCÉES:"
+  echo "  analytics_overview           - 📊 Vue d'ensemble globale (agrégations)"
+  echo "  analytics_sample_data        - 📋 Échantillon de données brutes"
+  echo "  analytics_expensive_trips    - 💰 Trajets les plus chers"
+  echo "  analytics_vendor_performance - 🚕 Vendeurs performants (HAVING)"
+  echo "  analytics_pickup_zones       - 📍 Zones premium (BETWEEN + HAVING)"
+  echo "  analytics_payment_analysis   - 💳 Paiements rentables (IN + HAVING)"
+  echo "  analytics_passenger_analysis - 👥 Groupes rentables (BETWEEN + HAVING)"
+  echo "  analytics_distance_analysis  - 📏 Trajets longue distance (IN + HAVING)"
+  echo "  analytics_vip_segments       - 🏆 Segments VIP (tous opérateurs)"
+  echo "  analytics_performance_benchmark - ⚡ Benchmark de performance"
+  echo ""
+  echo "🧪 TESTS DES NOUVEAUX OPÉRATEURS SQL:"
+  echo "  test_string_operators        - 🔍 Test CONTAINS, STARTS_WITH, ENDS_WITH"
+  echo "  test_in_operator            - 📊 Test opérateur IN"
+  echo "  test_between_operator       - 🎯 Test opérateur BETWEEN"
+  echo "  test_having_clause          - 🔥 Test clause HAVING"
+  echo ""
+  echo "🔧 UTILITAIRES:"
+  echo "  help                 - Afficher cette aide"
+  echo ""
+  echo "💡 EXEMPLES D'USAGE:"
+  echo "  ./curl-commands.sh create_table"
+  echo "  ./curl-commands.sh load_binary"
+  echo "  ./curl-commands.sh analytics_overview"
+  echo "  ./curl-commands.sh analytics_vendor_performance"
+  echo ""
+  echo "📁 CONFIGURATION:"
+  echo "  PARQUET_FILE=$PARQUET_FILE"
+  echo "  NODE1=$NODE1"
+  echo "  NODE2=$NODE2"
+  echo "  NODE3=$NODE3"
 }
 
-# 10. Benchmark de performance sur gros volume
-query_performance_benchmark() {
-  echo "=== BENCHMARK DE PERFORMANCE ==="
-  local start_time=$(date +%s%N)
+# Exécuter toutes les requêtes analytiques en séquence
+run_all_analytics() {
+  echo "🚀 EXÉCUTION DE TOUTES LES REQUÊTES ANALYTIQUES"
+  echo "================================================"
+  echo ""
+  
+  echo "1/8 - Vue d'ensemble globale..."
+  analytics_overview
+  echo ""
+  
+  echo "2/8 - Trajets les plus chers..."
+  analytics_expensive_trips
+  echo ""
+  
+  echo "3/8 - Performance des vendeurs..."
+  analytics_vendor_performance
+  echo ""
+  
+  echo "4/8 - Top zones de pickup..."
+  analytics_pickup_zones
+  echo ""
+  
+  echo "5/8 - Analyse des paiements..."
+  analytics_payment_analysis
+  echo ""
+  
+  echo "6/8 - Analyse par passagers..."
+  analytics_passenger_analysis
+  echo ""
+  
+  echo "7/8 - Analyse des distances..."
+  analytics_distance_analysis
+  echo ""
+  
+  echo "8/9 - Segments VIP..."
+  analytics_vip_segments
+  echo ""
+  
+  echo "9/9 - Benchmark de performance..."
+  analytics_performance_benchmark
+  echo ""
+  
+  echo "✅ TOUTES LES REQUÊTES ANALYTIQUES TERMINÉES"
+}
+
+# ========================================
+# POINT D'ENTRÉE PRINCIPAL
+# ========================================
+
+# Si aucun argument n'est fourni, afficher l'aide
+if [ $# -eq 0 ]; then
+  show_help
+  exit 0
+fi
+
+# Exécuter la commande demandée
+case "$1" in
+  "create_table")
+    create_table
+    ;;
+  "list_tables")
+    list_tables
+    ;;
+  "load_binary")
+    load_binary "$2" "$3" "$4" "$5"
+    ;;
+  "stats")
+    stats
+    ;;
+  "analytics_overview")
+    analytics_overview
+    ;;
+  "analytics_sample_data")
+    analytics_sample_data
+    ;;
+  "analytics_expensive_trips")
+    analytics_expensive_trips
+    ;;
+  "analytics_vendor_performance")
+    analytics_vendor_performance
+    ;;
+  "analytics_pickup_zones")
+    analytics_pickup_zones
+    ;;
+  "analytics_payment_analysis")
+    analytics_payment_analysis
+    ;;
+  "analytics_passenger_analysis")
+    analytics_passenger_analysis
+    ;;
+  "analytics_distance_analysis")
+    analytics_distance_analysis
+    ;;
+  "analytics_performance_benchmark")
+    analytics_performance_benchmark
+    ;;
+  "analytics_vip_segments")
+    analytics_vip_segments
+    ;;
+  "test_string_operators")
+    test_string_operators
+    ;;
+  "test_in_operator")
+    test_in_operator
+    ;;
+  "test_between_operator")
+    test_between_operator
+    ;;
+  "test_having_clause")
+    test_having_clause
+    ;;
+  "run_all_analytics")
+    run_all_analytics
+    ;;
+  "help")
+    show_help
+    ;;
+  *)
+    echo "❌ Commande inconnue: $1"
+    echo ""
+    show_help
+    exit 1
+    ;;
+esac
+
+# ========================================
+# NOUVELLES FONCTIONS DE TEST
+# ========================================
+
+# 🔍 Test des nouveaux opérateurs CONTAINS, STARTS_WITH, ENDS_WITH
+test_string_operators() {
+  echo "🔍 TEST DES NOUVEAUX OPÉRATEURS DE CHAÎNES"
+  echo "Test de l'opérateur CONTAINS..."
   
   curl --noproxy localhost -X POST -H "Content-Type: application/json" \
     -d '{
       "tableName": "parquet_file",
-      "columns": ["VendorID", "PULocationID", "DOLocationID"],
-      "groupBy": ["VendorID", "PULocationID", "DOLocationID"],
-      "aggregates": {
-        "trip_count": "COUNT",
-        "total_revenue": "SUM",
-        "avg_distance": "AVG",
-        "avg_duration": "AVG"
-      },
-      "aggregateColumns": {
-        "total_revenue": "total_amount",
-        "avg_distance": "trip_distance",
-        "avg_duration": "trip_distance"
-      },
-      "distributed": true,
-      "limit": 1000
+      "columns": ["VendorID", "payment_type"],
+      "conditions": [
+        {"columnName": "payment_type", "operator": "CONTAINS", "value": "1"}
+      ],
+      "limit": 100
     }' \
-    http://$NODE1/api/query > /dev/null
-    
-  local end_time=$(date +%s%N)
-  local duration=$(( (end_time - start_time) / 1000000 ))
-  echo "Temps d'exécution du benchmark: ${duration}ms"
+    "http://$NODE1/api/query" | jq '.'
 }
 
-# Exécution en fonction du paramètre
-case "$1" in
-  create)
-    create_table
-    ;;
-  list)
-    list_tables
-    ;;
-  load-small)
-    load_distributed_small
-    ;;
-  load-large)
-    load_distributed_large
-    ;;
-  load-full)
-    load_distributed_full
-    ;;
-  load-binary)
-    load_binary "${2:-$NODE1}" "${3:--1}" "${4:-100000}"
-    ;;
-  stats)
-    stats
-    ;;
-  stats-consolidated)
-    consolidated_stats
-    ;;
-  count-rows)
-    count_parquet_rows
-    ;;
-  query)
-    query_table
-    ;;
-  group-by)
-    query_group_by "$2"
-    ;;
-  aggregates)
-    query_group_by_aggregates "$2" "$3"
-    ;;
-  delete)
-    delete_table "$2"
-    ;;
-  health)
-    check_health
-    ;;
-  logs)
-    tail -f ./target/quarkus-logs/node1.log | grep --color=auto -E "ClusterManager|GroupBy|aggregated|results"
-    ;;
-  debug)
-    echo "Mode debug activé" && set -x && query_group_by_aggregates "${2:-PULocationID}" "${3:-trip_miles}" && set +x
-    ;;
-  test-small)
-    echo "Test avec petit jeu de données..."
-    create_table
-    load_distributed_parquet small
-    query_group_by_aggregates "${2:-PULocationID}" "${3:-trip_miles}"
-    ;;
-  test-large)
-    echo "Test avec grand jeu de données..."
-    create_table
-    load_distributed_parquet large
-    query_group_by_aggregates "${2:-PULocationID}" "${3:-trip_miles}"
-    ;;
-  test-coordinator)
-    echo "Test avec chargement sur le nœud coordonnateur uniquement..."
-    load_coordinator_only "${2:-50}"
-    query_group_by_aggregates "${3:-PULocationID}" "${4:-trip_miles}"
-    ;;
-  university-setup)
-    echo "Configuration pour environnement universitaire avec machines distinctes..."
-    university_setup "${2:-100}" "${3:-$NODE1}" "${4:-$PARQUET_FILE}"
-    ;;
-  vendor-analysis)
-    query_vendor_analysis
-    ;;
-  popular-pickup-zones)
-    query_popular_pickup_zones
-    ;;
-  payment-analysis)
-    query_payment_analysis
-    ;;
-  distance-analysis)
-    query_distance_analysis
-    ;;
-  tip-by-passengers)
-    query_tip_by_passengers
-    ;;
-  ratecode-analysis)
-    query_ratecode_analysis
-    ;;
-  airport-fee-analysis)
-    query_airport_fee_analysis
-    ;;
-  vendor-pickup-analysis)
-    query_vendor_pickup_analysis
-    ;;
-  trip-length-performance)
-    query_trip_length_performance
-    ;;
-  performance-benchmark)
-    query_performance_benchmark
-    ;;
-  *)
-    echo "Usage: ./curl-commands.sh [create|list|load-small|load-large|load-full|stats|stats-consolidated|count-rows|query|group-by|aggregates|delete|health|logs|debug|test-small|test-large|test-coordinator|university-setup|vendor-analysis|popular-pickup-zones|payment-analysis|distance-analysis|tip-by-passengers|ratecode-analysis|airport-fee-analysis|vendor-pickup-analysis|trip-length-performance|performance-benchmark]"
-    echo ""
-    echo "Exemples:"
-    echo "  $0 create             - Crée la table parquet_file"
-    echo "  $0 list               - Liste toutes les tables sur les 3 nœuds"
-    echo "  $0 load-small         - Charge 3 lignes (depuis fichier local)"
-    echo "  $0 load-large         - Charge 1000 lignes (depuis fichier local)"
-    echo "  $0 load-full          - Charge le fichier complet (depuis fichier local)"
-    echo "  $0 stats              - Affiche les statistiques de la table sur tous les nœuds"
-    echo "  $0 stats-consolidated - Affiche les statistiques consolidées sur l'ensemble du cluster"
-    echo "  $0 count-rows         - Compte le nombre de lignes dans le fichier Parquet sans charger les données"
-    echo "  $0 query              - Exécute une requête simple"
-    echo "  $0 group-by column    - Exécute une requête avec GROUP BY sur la colonne spécifiée"
-    echo "  $0 aggregates col val - Exécute une requête avec GROUP BY et fonctions d'agrégation"
-    echo "  $0 delete nom         - Supprime la table spécifiée (par défaut: parquet_file)"
-    echo "  $0 health             - Vérifie l'état de santé du cluster"
-    echo "  $0 vendor-analysis    - Analyse des vendeurs de taxi"
-    echo "  $0 popular-pickup-zones - Analyse des zones de pickup les plus populaires"
-    echo "  $0 payment-analysis   - Analyse des types de paiement"
-    echo "  $0 distance-analysis  - Analyse des distances de voyage"
-    echo "  $0 tip-by-passengers  - Analyse des pourboires par nombre de passagers"
-    echo "  $0 ratecode-analysis  - Analyse des trajets par code tarifaire"
-    echo "  $0 airport-fee-analysis - Analyse des trajets avec frais d'aéroport"
-    echo "  $0 vendor-pickup-analysis - Analyse croisée vendeur vs zone de pickup"
-    echo "  $0 trip-length-performance - Analyse de performance: Trajets longs vs courts"
-    echo "  $0 performance-benchmark - Benchmark de performance sur gros volume"
-    ;;
-esac
+# 📊 Test de l'opérateur IN
+test_in_operator() {
+  echo "📊 TEST DE L'OPÉRATEUR IN"
+  echo "Test avec VendorID IN (1, 2)..."
+  
+  curl --noproxy localhost -X POST -H "Content-Type: application/json" \
+    -d '{
+      "tableName": "parquet_file",
+      "columns": ["VendorID"],
+      "conditions": [
+        {"columnName": "VendorID", "operator": "IN", "value": [1, 2]}
+      ],
+      "groupBy": ["VendorID"],
+      "aggregates": {"count": "COUNT"},
+      "aggregateColumns": {"count": "*"},
+      "limit": 10
+    }' \
+    "http://$NODE1/api/query" | jq '.'
+}
+
+# 🎯 Test de l'opérateur BETWEEN
+test_between_operator() {
+  echo "🎯 TEST DE L'OPÉRATEUR BETWEEN"
+  echo "Test avec fare_amount BETWEEN 10 AND 50..."
+  
+  curl --noproxy localhost -X POST -H "Content-Type: application/json" \
+    -d '{
+      "tableName": "parquet_file",
+      "columns": ["trip_distance", "fare_amount"],
+      "conditions": [
+        {"columnName": "fare_amount", "operator": "BETWEEN", "value": [10, 50]}
+      ],
+      "limit": 100
+    }' \
+    "http://$NODE1/api/query" | jq '.'
+}
+
+# 🔥 Test de la clause HAVING avec agrégations
+test_having_clause() {
+  echo "🔥 TEST DE LA CLAUSE HAVING AVEC AGRÉGATIONS"
+  echo "Test avec HAVING total_trips > 1000 AND avg_fare > 10..."
+  
+  curl --noproxy localhost -X POST -H "Content-Type: application/json" \
+    -d '{
+      "tableName": "parquet_file",
+      "columns": ["VendorID"],
+      "groupBy": ["VendorID"],
+      "aggregates": {"total_trips": "COUNT", "avg_fare": "AVG"},
+      "aggregateColumns": {"total_trips": "*", "avg_fare": "fare_amount"},
+      "havingConditions": [
+        {"columnName": "total_trips", "operator": "GREATER_THAN", "value": 1000},
+        {"columnName": "avg_fare", "operator": "GREATER_THAN", "value": 10}
+      ],
+      "limit": 10
+    }' \
+    "http://$NODE1/api/query" | jq '.'
+}

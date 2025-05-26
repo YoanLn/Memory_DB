@@ -4,6 +4,9 @@ import com.memorydb.common.DataType;
 import com.memorydb.core.Column;
 import com.memorydb.storage.ColumnStore;
 
+import java.util.List;
+import java.util.Arrays;
+
 /**
  * Représente une condition dans une clause WHERE
  */
@@ -20,6 +23,12 @@ public class Condition {
         GREATER_THAN,
         GREATER_THAN_OR_EQUALS,
         LIKE,
+        CONTAINS,
+        STARTS_WITH,
+        ENDS_WITH,
+        IN,
+        NOT_IN,
+        BETWEEN,
         IS_NULL,
         IS_NOT_NULL
     }
@@ -56,6 +65,67 @@ public class Condition {
      */
     public static Condition isNotNull(String columnName) {
         return new Condition(columnName, Operator.IS_NOT_NULL, null);
+    }
+    
+    /**
+     * Crée une nouvelle condition CONTAINS
+     * @param columnName Le nom de la colonne
+     * @param substring La sous-chaîne à rechercher
+     * @return La condition
+     */
+    public static Condition contains(String columnName, String substring) {
+        return new Condition(columnName, Operator.CONTAINS, substring);
+    }
+    
+    /**
+     * Crée une nouvelle condition STARTS_WITH
+     * @param columnName Le nom de la colonne
+     * @param prefix Le préfixe à rechercher
+     * @return La condition
+     */
+    public static Condition startsWith(String columnName, String prefix) {
+        return new Condition(columnName, Operator.STARTS_WITH, prefix);
+    }
+    
+    /**
+     * Crée une nouvelle condition ENDS_WITH
+     * @param columnName Le nom de la colonne
+     * @param suffix Le suffixe à rechercher
+     * @return La condition
+     */
+    public static Condition endsWith(String columnName, String suffix) {
+        return new Condition(columnName, Operator.ENDS_WITH, suffix);
+    }
+    
+    /**
+     * Crée une nouvelle condition IN
+     * @param columnName Le nom de la colonne
+     * @param values La liste des valeurs
+     * @return La condition
+     */
+    public static Condition in(String columnName, List<Object> values) {
+        return new Condition(columnName, Operator.IN, values);
+    }
+    
+    /**
+     * Crée une nouvelle condition NOT IN
+     * @param columnName Le nom de la colonne
+     * @param values La liste des valeurs
+     * @return La condition
+     */
+    public static Condition notIn(String columnName, List<Object> values) {
+        return new Condition(columnName, Operator.NOT_IN, values);
+    }
+    
+    /**
+     * Crée une nouvelle condition BETWEEN
+     * @param columnName Le nom de la colonne
+     * @param minValue La valeur minimale (inclusive)
+     * @param maxValue La valeur maximale (inclusive)
+     * @return La condition
+     */
+    public static Condition between(String columnName, Object minValue, Object maxValue) {
+        return new Condition(columnName, Operator.BETWEEN, Arrays.asList(minValue, maxValue));
     }
     
     /**
@@ -136,21 +206,50 @@ public class Condition {
      */
     private boolean evaluateInt(int row, ColumnStore columnStore) {
         int rowValue = columnStore.getInt(row);
-        int compareValue = ((Number) value).intValue();
         
         switch (operator) {
             case EQUALS:
+                int compareValue = ((Number) value).intValue();
                 return rowValue == compareValue;
             case NOT_EQUALS:
-                return rowValue != compareValue;
+                int compareValue2 = ((Number) value).intValue();
+                return rowValue != compareValue2;
             case LESS_THAN:
-                return rowValue < compareValue;
+                int compareValue3 = ((Number) value).intValue();
+                return rowValue < compareValue3;
             case LESS_THAN_OR_EQUALS:
-                return rowValue <= compareValue;
+                int compareValue4 = ((Number) value).intValue();
+                return rowValue <= compareValue4;
             case GREATER_THAN:
-                return rowValue > compareValue;
+                int compareValue5 = ((Number) value).intValue();
+                return rowValue > compareValue5;
             case GREATER_THAN_OR_EQUALS:
-                return rowValue >= compareValue;
+                int compareValue6 = ((Number) value).intValue();
+                return rowValue >= compareValue6;
+            case IN:
+                @SuppressWarnings("unchecked")
+                List<Object> values = (List<Object>) value;
+                for (Object val : values) {
+                    if (val instanceof Number && ((Number) val).intValue() == rowValue) {
+                        return true;
+                    }
+                }
+                return false;
+            case NOT_IN:
+                @SuppressWarnings("unchecked")
+                List<Object> values2 = (List<Object>) value;
+                for (Object val : values2) {
+                    if (val instanceof Number && ((Number) val).intValue() == rowValue) {
+                        return false;
+                    }
+                }
+                return true;
+            case BETWEEN:
+                @SuppressWarnings("unchecked")
+                List<Object> range = (List<Object>) value;
+                int minValue = ((Number) range.get(0)).intValue();
+                int maxValue = ((Number) range.get(1)).intValue();
+                return rowValue >= minValue && rowValue <= maxValue;
             default:
                 throw new IllegalArgumentException("Opérateur non supporté pour INTEGER: " + operator);
         }
@@ -164,21 +263,50 @@ public class Condition {
      */
     private boolean evaluateLong(int row, ColumnStore columnStore) {
         long rowValue = columnStore.getLong(row);
-        long compareValue = ((Number) value).longValue();
         
         switch (operator) {
             case EQUALS:
+                long compareValue = ((Number) value).longValue();
                 return rowValue == compareValue;
             case NOT_EQUALS:
-                return rowValue != compareValue;
+                long compareValue2 = ((Number) value).longValue();
+                return rowValue != compareValue2;
             case LESS_THAN:
-                return rowValue < compareValue;
+                long compareValue3 = ((Number) value).longValue();
+                return rowValue < compareValue3;
             case LESS_THAN_OR_EQUALS:
-                return rowValue <= compareValue;
+                long compareValue4 = ((Number) value).longValue();
+                return rowValue <= compareValue4;
             case GREATER_THAN:
-                return rowValue > compareValue;
+                long compareValue5 = ((Number) value).longValue();
+                return rowValue > compareValue5;
             case GREATER_THAN_OR_EQUALS:
-                return rowValue >= compareValue;
+                long compareValue6 = ((Number) value).longValue();
+                return rowValue >= compareValue6;
+            case IN:
+                @SuppressWarnings("unchecked")
+                List<Object> values = (List<Object>) value;
+                for (Object val : values) {
+                    if (val instanceof Number && ((Number) val).longValue() == rowValue) {
+                        return true;
+                    }
+                }
+                return false;
+            case NOT_IN:
+                @SuppressWarnings("unchecked")
+                List<Object> values2 = (List<Object>) value;
+                for (Object val : values2) {
+                    if (val instanceof Number && ((Number) val).longValue() == rowValue) {
+                        return false;
+                    }
+                }
+                return true;
+            case BETWEEN:
+                @SuppressWarnings("unchecked")
+                List<Object> range = (List<Object>) value;
+                long minValue = ((Number) range.get(0)).longValue();
+                long maxValue = ((Number) range.get(1)).longValue();
+                return rowValue >= minValue && rowValue <= maxValue;
             default:
                 throw new IllegalArgumentException("Opérateur non supporté pour LONG: " + operator);
         }
@@ -220,21 +348,50 @@ public class Condition {
      */
     private boolean evaluateDouble(int row, ColumnStore columnStore) {
         double rowValue = columnStore.getDouble(row);
-        double compareValue = ((Number) value).doubleValue();
         
         switch (operator) {
             case EQUALS:
+                double compareValue = ((Number) value).doubleValue();
                 return rowValue == compareValue;
             case NOT_EQUALS:
-                return rowValue != compareValue;
+                double compareValue2 = ((Number) value).doubleValue();
+                return rowValue != compareValue2;
             case LESS_THAN:
-                return rowValue < compareValue;
+                double compareValue3 = ((Number) value).doubleValue();
+                return rowValue < compareValue3;
             case LESS_THAN_OR_EQUALS:
-                return rowValue <= compareValue;
+                double compareValue4 = ((Number) value).doubleValue();
+                return rowValue <= compareValue4;
             case GREATER_THAN:
-                return rowValue > compareValue;
+                double compareValue5 = ((Number) value).doubleValue();
+                return rowValue > compareValue5;
             case GREATER_THAN_OR_EQUALS:
-                return rowValue >= compareValue;
+                double compareValue6 = ((Number) value).doubleValue();
+                return rowValue >= compareValue6;
+            case IN:
+                @SuppressWarnings("unchecked")
+                List<Object> values = (List<Object>) value;
+                for (Object val : values) {
+                    if (val instanceof Number && ((Number) val).doubleValue() == rowValue) {
+                        return true;
+                    }
+                }
+                return false;
+            case NOT_IN:
+                @SuppressWarnings("unchecked")
+                List<Object> values2 = (List<Object>) value;
+                for (Object val : values2) {
+                    if (val instanceof Number && ((Number) val).doubleValue() == rowValue) {
+                        return false;
+                    }
+                }
+                return true;
+            case BETWEEN:
+                @SuppressWarnings("unchecked")
+                List<Object> range = (List<Object>) value;
+                double minValue = ((Number) range.get(0)).doubleValue();
+                double maxValue = ((Number) range.get(1)).doubleValue();
+                return rowValue >= minValue && rowValue <= maxValue;
             default:
                 throw new IllegalArgumentException("Opérateur non supporté pour DOUBLE: " + operator);
         }
@@ -277,6 +434,16 @@ public class Condition {
                 return !rowValue.equals(compareValue);
             case LIKE:
                 return matchesLike(rowValue, compareValue);
+            case CONTAINS:
+                return rowValue.contains(compareValue);
+            case STARTS_WITH:
+                return rowValue.startsWith(compareValue);
+            case ENDS_WITH:
+                return rowValue.endsWith(compareValue);
+            case IN:
+                return ((List<Object>) value).contains(rowValue);
+            case NOT_IN:
+                return !((List<Object>) value).contains(rowValue);
             default:
                 throw new IllegalArgumentException("Opérateur non supporté pour STRING: " + operator);
         }
@@ -305,6 +472,11 @@ public class Condition {
                 return rowValue > compareValue;
             case GREATER_THAN_OR_EQUALS:
                 return rowValue >= compareValue;
+            case BETWEEN:
+                List<Object> range = (List<Object>) value;
+                long minValue = ((Number) range.get(0)).longValue();
+                long maxValue = ((Number) range.get(1)).longValue();
+                return rowValue >= minValue && rowValue <= maxValue;
             default:
                 throw new IllegalArgumentException("Opérateur non supporté pour DATE/TIMESTAMP: " + operator);
         }

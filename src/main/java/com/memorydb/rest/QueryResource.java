@@ -809,6 +809,14 @@ public class QueryResource {
             }
         }
         
+        // Ajoute les conditions HAVING
+        List<Condition> havingConditions = queryDto.toHavingConditions();
+        if (havingConditions != null) {
+            for (Condition condition : havingConditions) {
+                query.having(condition);
+            }
+        }
+        
         // Ajoute le tri (support des colonnes multiples)
         List<OrderByDto> orderByList = queryDto.getOrderBy();
         if (orderByList != null && !orderByList.isEmpty()) {

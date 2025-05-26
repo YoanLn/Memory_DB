@@ -613,14 +613,24 @@
                     <h3>📈 Analyses Métier NYC Taxi</h3>
                     <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px;">
                         <button class="btn btn-success" onclick="testBasicQuery()">🔍 Test Basique</button>
-                        <button class="btn btn-info" onclick="executeAnalysis('count-all')">📊 Vue d'Ensemble</button>
-                        <button class="btn btn-info" onclick="executeAnalysis('sample')">💰 Trajets Chers</button>
-                        <button class="btn btn-info" onclick="executeAnalysis('vendor')">🚕 Analyse Vendeurs</button>
-                        <button class="btn btn-info" onclick="executeAnalysis('pickup-zones')">📍 Top Zones</button>
-                        <button class="btn btn-info" onclick="executeAnalysis('payment')">💳 Paiements & Tips</button>
-                        <button class="btn btn-info" onclick="executeAnalysis('passengers')">👥 Passagers</button>
-                        <button class="btn btn-info" onclick="executeAnalysis('distance-analysis')">📏 Distances</button>
-                        <button class="btn btn-warning" onclick="executeAnalysis('performance')">⚡ Performance</button>
+                        <button class="btn btn-info" onclick="runAnalytics('overview')">📊 Vue d'Ensemble</button>
+                        <button class="btn btn-info" onclick="runAnalytics('sample-data')">📋 Données Brutes</button>
+                        <button class="btn btn-info" onclick="runAnalytics('expensive-trips')">💰 Trajets Chers</button>
+                        <button class="btn btn-info" onclick="runAnalytics('vendor-performance')">🚕 Vendeurs Premium</button>
+                        <button class="btn btn-info" onclick="runAnalytics('pickup-zones')">📍 Zones Premium</button>
+                        <button class="btn btn-info" onclick="runAnalytics('payment-analysis')">💳 Paiements Premium</button>
+                        <button class="btn btn-info" onclick="runAnalytics('passenger-analysis')">👥 Groupes Rentables</button>
+                        <button class="btn btn-info" onclick="runAnalytics('distance-analysis')">📏 Longue Distance</button>
+                        <button class="btn btn-info" onclick="runAnalytics('vip-segments')">🏆 Segments VIP</button>
+                        <button class="btn btn-warning" onclick="runAnalytics('performance')">⚡ Benchmark</button>
+                    </div>
+                    <br>
+                    <h5>🧪 Tests Opérateurs SQL Avancés</h5>
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px;">
+                        <button class="btn btn-secondary" onclick="testStringOperators()">🔍 Test CONTAINS</button>
+                        <button class="btn btn-secondary" onclick="testInOperator()">📊 Test IN</button>
+                        <button class="btn btn-secondary" onclick="testBetweenOperator()">🎯 Test BETWEEN</button>
+                        <button class="btn btn-secondary" onclick="testHavingClause()">🔥 Test HAVING</button>
                     </div>
                     <div id="analyticsResult" class="result-area"></div>
                 </div>

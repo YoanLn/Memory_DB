@@ -12,6 +12,7 @@ public class Query {
     private final String tableName;
     private final List<String> selectColumns;
     private final List<Condition> conditions;
+    private final List<Condition> havingConditions;
     private final List<String> groupByColumns;
     private final Map<String, AggregateDefinition> aggregateFunctions;
     // Old single column order by (for backwards compatibility)
@@ -30,6 +31,7 @@ public class Query {
         this.tableName = tableName;
         this.selectColumns = new ArrayList<>();
         this.conditions = new ArrayList<>();
+        this.havingConditions = new ArrayList<>();
         this.groupByColumns = new ArrayList<>();
         this.aggregateFunctions = new HashMap<String, AggregateDefinition>();
         this.orderBy = null;
@@ -63,6 +65,16 @@ public class Query {
      */
     public Query where(Condition condition) {
         conditions.add(condition);
+        return this;
+    }
+    
+    /**
+     * Ajoute une condition HAVING à la requête
+     * @param condition La condition HAVING
+     * @return Cette requête
+     */
+    public Query having(Condition condition) {
+        havingConditions.add(condition);
         return this;
     }
     
@@ -245,6 +257,14 @@ public class Query {
      */
     public List<Condition> getConditions() {
         return new ArrayList<>(conditions);
+    }
+    
+    /**
+     * Obtient la liste des conditions HAVING
+     * @return Les conditions HAVING
+     */
+    public List<Condition> getHavingConditions() {
+        return new ArrayList<>(havingConditions);
     }
     
     /**

@@ -28,6 +28,10 @@ public class QueryDto {
     // Added fields for GROUP BY and aggregation support
     private List<String> groupBy;
     private Map<String, String> aggregates; // format: {"column": "FUNCTION"}
+    // HAVING clause support for filtering aggregated results
+    private List<ConditionDto> havingConditions;
+    // Support for aggregate columns mapping (alias -> column name)
+    private Map<String, String> aggregateColumns;
     /**
      * Flag indiquant si la requête a déjà été transmise à un autre nœud.
      * Utilisé pour éviter les boucles infinies dans les requêtes distribuées.
@@ -40,6 +44,8 @@ public class QueryDto {
     public QueryDto() {
         this.groupBy = new ArrayList<>();
         this.aggregates = new HashMap<>();
+        this.havingConditions = new ArrayList<>();
+        this.aggregateColumns = new HashMap<>();
     }
     
     /**
@@ -62,6 +68,8 @@ public class QueryDto {
         this.distributed = false;
         this.groupBy = new ArrayList<>();
         this.aggregates = new HashMap<>();
+        this.havingConditions = new ArrayList<>();
+        this.aggregateColumns = new HashMap<>();
         
         // Initialize orderBy list with the single column for backward compatibility
         if (orderByColumn != null && !orderByColumn.isEmpty()) {
@@ -93,6 +101,8 @@ public class QueryDto {
         this.distributed = distributed;
         this.groupBy = new ArrayList<>();
         this.aggregates = new HashMap<>();
+        this.havingConditions = new ArrayList<>();
+        this.aggregateColumns = new HashMap<>();
         
         // Initialize orderBy list with the single column for backward compatibility
         if (orderByColumn != null && !orderByColumn.isEmpty()) {
@@ -330,6 +340,55 @@ public class QueryDto {
             } catch (IllegalArgumentException e) {
                 // Skip invalid function names
             }
+        }
+        return result;
+    }
+    
+    /**
+     * Get the HAVING conditions
+     * @return list of HAVING conditions
+     */
+    public List<ConditionDto> getHavingConditions() {
+        return havingConditions;
+    }
+    
+    /**
+     * Set the HAVING conditions
+     * @param havingConditions list of HAVING conditions
+     */
+    public void setHavingConditions(List<ConditionDto> havingConditions) {
+        this.havingConditions = havingConditions;
+    }
+    
+    /**
+     * Get the aggregate columns mapping
+     * @return map of alias to column name
+     */
+    public Map<String, String> getAggregateColumns() {
+        return aggregateColumns;
+    }
+    
+    /**
+     * Set the aggregate columns mapping
+     * @param aggregateColumns map of alias to column name
+     */
+    public void setAggregateColumns(Map<String, String> aggregateColumns) {
+        this.aggregateColumns = aggregateColumns;
+    }
+    
+    /**
+     * Convert HAVING conditions to Condition objects
+     * @return list of HAVING conditions
+     */
+    @JsonIgnore
+    public List<Condition> toHavingConditions() {
+        if (havingConditions == null || havingConditions.isEmpty()) {
+            return Collections.emptyList();
+        }
+        
+        List<Condition> result = new ArrayList<>(havingConditions.size());
+        for (ConditionDto conditionDto : havingConditions) {
+            result.add(conditionDto.toCondition());
         }
         return result;
     }

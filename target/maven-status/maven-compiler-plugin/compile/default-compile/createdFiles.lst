@@ -47,6 +47,7 @@ com/memorydb/processing/UltraFastEventProcessor$UltraFastEventHandler.class
 com/memorydb/rest/ClusterResource.class
 com/memorydb/parquet/ParquetLoadOptions.class
 com/memorydb/distribution/NodeClient.class
+com/memorydb/query/SQLParser$1.class
 com/memorydb/query/QueryExecutor.class
 com/memorydb/query/QueryExecutor$GroupingCache.class
 com/memorydb/processing/UltraFastEventProcessor$DataEventFactory.class

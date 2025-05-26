@@ -190,6 +190,11 @@ public class QueryExecutor {
             QueryResult result = createResultVectorized(tableData, columnNames, groupedRows, 
                                                        query.getGroupByColumns(), query.getAggregateFunctions());
             
+            // Apply HAVING clause if present
+            if (!query.getHavingConditions().isEmpty()) {
+                result = applyHavingClause(result, query.getHavingConditions());
+            }
+            
             long elapsedNanos = System.nanoTime() - startTime;
             if (logger.isInfoEnabled() && filteredRows.size() > 100_000) {
                 logger.info("ULTRA-FAST: Query completed in {:.2f}ms for {} rows, {} groups", 
@@ -373,6 +378,155 @@ public class QueryExecutor {
             });
         }
         return left;
+    }
+    
+    /**
+     * Apply HAVING clause to filter aggregated results
+     * @param result The query result after aggregation
+     * @param havingConditions The HAVING conditions to apply
+     * @return Filtered query result
+     */
+    private QueryResult applyHavingClause(QueryResult result, List<Condition> havingConditions) {
+        if (havingConditions.isEmpty()) {
+            return result;
+        }
+        
+        List<String> columnNames = result.getColumns();
+        List<Map<String, Object>> originalRows = result.getRows();
+        List<Map<String, Object>> filteredRows = new ArrayList<>();
+        
+        // Filter each row based on HAVING conditions
+        for (Map<String, Object> row : originalRows) {
+            boolean matchesAllConditions = true;
+            
+            for (Condition condition : havingConditions) {
+                if (!evaluateHavingCondition(condition, row)) {
+                    matchesAllConditions = false;
+                    break;
+                }
+            }
+            
+            if (matchesAllConditions) {
+                filteredRows.add(row);
+            }
+        }
+        
+        return new QueryResult(columnNames, filteredRows);
+    }
+    
+    /**
+     * Evaluate a HAVING condition against a result row
+     * @param condition The condition to evaluate
+     * @param row The result row (contains aggregated values)
+     * @return true if the condition is satisfied
+     */
+    private boolean evaluateHavingCondition(Condition condition, Map<String, Object> row) {
+        String columnName = condition.getColumnName();
+        Object rowValue = row.get(columnName);
+        Object conditionValue = condition.getValue();
+        Condition.Operator operator = condition.getOperator();
+        
+        // Handle NULL values
+        if (operator == Condition.Operator.IS_NULL) {
+            return rowValue == null;
+        }
+        if (operator == Condition.Operator.IS_NOT_NULL) {
+            return rowValue != null;
+        }
+        
+        if (rowValue == null) {
+            return false; // NULL values don't match any comparison except IS NULL
+        }
+        
+        // Evaluate condition based on operator
+        switch (operator) {
+            case EQUALS:
+                return compareValues(rowValue, conditionValue) == 0;
+            case NOT_EQUALS:
+                return compareValues(rowValue, conditionValue) != 0;
+            case LESS_THAN:
+                return compareValues(rowValue, conditionValue) < 0;
+            case LESS_THAN_OR_EQUALS:
+                return compareValues(rowValue, conditionValue) <= 0;
+            case GREATER_THAN:
+                return compareValues(rowValue, conditionValue) > 0;
+            case GREATER_THAN_OR_EQUALS:
+                return compareValues(rowValue, conditionValue) >= 0;
+            case LIKE:
+                return matchesLike(rowValue.toString(), conditionValue.toString());
+            case CONTAINS:
+                return rowValue.toString().contains(conditionValue.toString());
+            case STARTS_WITH:
+                return rowValue.toString().startsWith(conditionValue.toString());
+            case ENDS_WITH:
+                return rowValue.toString().endsWith(conditionValue.toString());
+            case IN:
+                @SuppressWarnings("unchecked")
+                List<Object> values = (List<Object>) conditionValue;
+                return values.contains(rowValue);
+            case NOT_IN:
+                @SuppressWarnings("unchecked")
+                List<Object> values2 = (List<Object>) conditionValue;
+                return !values2.contains(rowValue);
+            case BETWEEN:
+                @SuppressWarnings("unchecked")
+                List<Object> range = (List<Object>) conditionValue;
+                if (range.size() != 2) return false;
+                return compareValues(rowValue, range.get(0)) >= 0 && 
+                       compareValues(rowValue, range.get(1)) <= 0;
+            default:
+                throw new IllegalArgumentException("Unsupported HAVING operator: " + operator);
+        }
+    }
+    
+    /**
+     * Compare two values for HAVING clause evaluation
+     * @param left Left value
+     * @param right Right value
+     * @return Comparison result (-1, 0, 1)
+     */
+    @SuppressWarnings("unchecked")
+    private int compareValues(Object left, Object right) {
+        if (left == null && right == null) return 0;
+        if (left == null) return -1;
+        if (right == null) return 1;
+        
+        // Handle numeric comparisons
+        if (left instanceof Number && right instanceof Number) {
+            double leftVal = ((Number) left).doubleValue();
+            double rightVal = ((Number) right).doubleValue();
+            return Double.compare(leftVal, rightVal);
+        }
+        
+        // Handle string comparisons
+        if (left instanceof String && right instanceof String) {
+            return ((String) left).compareTo((String) right);
+        }
+        
+        // Handle comparable objects
+        if (left instanceof Comparable && right instanceof Comparable) {
+            try {
+                return ((Comparable<Object>) left).compareTo(right);
+            } catch (ClassCastException e) {
+                // Fall back to string comparison
+                return left.toString().compareTo(right.toString());
+            }
+        }
+        
+        // Default to string comparison
+        return left.toString().compareTo(right.toString());
+    }
+    
+    /**
+     * Check if a string matches a LIKE pattern
+     * @param value The string to check
+     * @param pattern The LIKE pattern
+     * @return true if matches
+     */
+    private boolean matchesLike(String value, String pattern) {
+        // Convert SQL LIKE pattern to regex
+        String regex = pattern.replace("%", ".*").replace("_", ".");
+        return value.matches(regex);
     }
     
     /**
