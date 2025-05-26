@@ -1654,6 +1654,416 @@
             hideLoading();
         }
 
+        // Analyses métier avec opérateurs SQL avancés
+        async function runAnalytics(type) {
+            showLoading();
+            const startTime = Date.now();
+            
+            let query;
+            switch(type) {
+                case 'overview':
+                    // Vue d'ensemble globale - Statistiques consolidées du cluster
+                    query = {
+                        tableName: "parquet_file",
+                        columns: [],
+                        aggregates: {
+                            "COUNT_STAR": "COUNT",
+                            "AVG_fare_amount": "AVG",
+                            "SUM_total_amount": "SUM",
+                            "AVG_trip_distance": "AVG",
+                            "MAX_fare_amount": "MAX",
+                            "MIN_fare_amount": "MIN",
+                            "AVG_tip_amount": "AVG",
+                            "SUM_tip_amount": "SUM"
+                        },
+                        distributed: true
+                    };
+                    break;
+                    
+                case 'sample-data':
+                    // Échantillon de données brutes - Toutes les colonnes
+                    query = {
+                        tableName: "parquet_file",
+                        columns: ["*"],
+                        conditions: [
+                            {"columnName": "fare_amount", "operator": "GREATER_THAN", "value": 5}
+                        ],
+                        orderBy: [{"column": "total_amount", "ascending": false}],
+                        limit: 100,
+                        distributed: true
+                    };
+                    break;
+                    
+                case 'expensive-trips':
+                    // Trajets les plus chers - WHERE total_amount > 100
+                    query = {
+                        tableName: "parquet_file",
+                        columns: ["VendorID", "passenger_count", "trip_distance", "fare_amount", "tip_amount", "total_amount", "PULocationID", "DOLocationID"],
+                        conditions: [
+                            {"columnName": "total_amount", "operator": "GREATER_THAN", "value": 50}
+                        ],
+                        orderBy: [{"column": "total_amount", "ascending": false}],
+                        distributed: true
+                    };
+                    break;
+                    
+                case 'vendor-performance':
+                    // Performance des vendeurs avec HAVING et IN
+                    query = {
+                        tableName: "parquet_file",
+                        columns: ["VendorID"],
+                        conditions: [
+                            {"columnName": "VendorID", "operator": "IN", "value": [1, 2, 3, 4, 5]}
+                        ],
+                        groupBy: ["VendorID"],
+                        aggregates: {
+                            "COUNT_STAR": "COUNT",
+                            "SUM_total_amount": "SUM",
+                            "AVG_fare_amount": "AVG",
+                            "AVG_tip_amount": "AVG",
+                            "AVG_trip_distance": "AVG"
+                        },
+                        havingConditions: [
+                            {"columnName": "COUNT_STAR", "operator": "GREATER_THAN", "value": 1000},
+                            {"columnName": "AVG_fare_amount", "operator": "GREATER_THAN", "value": 15}
+                        ],
+                        orderBy: [{"column": "SUM_total_amount", "ascending": false}],
+                        distributed: true
+                    };
+                    break;
+                    
+                case 'pickup-zones':
+                    // Zones premium avec BETWEEN et HAVING
+                    query = {
+                        tableName: "parquet_file",
+                        columns: ["PULocationID"],
+                        conditions: [
+                            {"columnName": "PULocationID", "operator": "IS_NOT_NULL"},
+                            {"columnName": "PULocationID", "operator": "BETWEEN", "value": [1, 300]}
+                        ],
+                        groupBy: ["PULocationID"],
+                        aggregates: {
+                            "COUNT_STAR": "COUNT",
+                            "SUM_total_amount": "SUM",
+                            "AVG_fare_amount": "AVG",
+                            "AVG_trip_distance": "AVG",
+                            "MAX_fare_amount": "MAX"
+                        },
+                        havingConditions: [
+                            {"columnName": "COUNT_STAR", "operator": "GREATER_THAN", "value": 500},
+                            {"columnName": "AVG_fare_amount", "operator": "BETWEEN", "value": [20, 100]}
+                        ],
+                        orderBy: [{"column": "SUM_total_amount", "ascending": false}],
+                        distributed: true
+                    };
+                    break;
+                    
+                case 'payment-analysis':
+                    // Analyse paiements premium avec IN et HAVING
+                    query = {
+                        tableName: "parquet_file",
+                        columns: ["payment_type"],
+                        conditions: [
+                            {"columnName": "payment_type", "operator": "IN", "value": [1, 2, 3, 4, 5]},
+                            {"columnName": "tip_amount", "operator": "GREATER_THAN_OR_EQUALS", "value": 0}
+                        ],
+                        groupBy: ["payment_type"],
+                        aggregates: {
+                            "COUNT_STAR": "COUNT",
+                            "SUM_total_amount": "SUM",
+                            "AVG_fare_amount": "AVG",
+                            "AVG_tip_amount": "AVG",
+                            "SUM_tip_amount": "SUM"
+                        },
+                        havingConditions: [
+                            {"columnName": "COUNT_STAR", "operator": "GREATER_THAN", "value": 10000},
+                            {"columnName": "AVG_tip_amount", "operator": "GREATER_THAN", "value": 2}
+                        ],
+                        orderBy: [{"column": "SUM_total_amount", "ascending": false}],
+                        distributed: true
+                    };
+                    break;
+                    
+                case 'passenger-analysis':
+                    // Groupes rentables avec BETWEEN et HAVING
+                    query = {
+                        tableName: "parquet_file",
+                        columns: ["passenger_count"],
+                        conditions: [
+                            {"columnName": "passenger_count", "operator": "BETWEEN", "value": [1, 6]},
+                            {"columnName": "fare_amount", "operator": "GREATER_THAN", "value": 5}
+                        ],
+                        groupBy: ["passenger_count"],
+                        aggregates: {
+                            "COUNT_STAR": "COUNT",
+                            "AVG_fare_amount": "AVG",
+                            "AVG_tip_amount": "AVG",
+                            "SUM_total_amount": "SUM",
+                            "AVG_trip_distance": "AVG"
+                        },
+                        havingConditions: [
+                            {"columnName": "COUNT_STAR", "operator": "GREATER_THAN", "value": 5000},
+                            {"columnName": "AVG_fare_amount", "operator": "GREATER_THAN", "value": 25}
+                        ],
+                        orderBy: [{"column": "AVG_fare_amount", "ascending": false}],
+                        distributed: true
+                    };
+                    break;
+                    
+                case 'distance-analysis':
+                    // Trajets longue distance avec BETWEEN, IN et HAVING
+                    query = {
+                        tableName: "parquet_file",
+                        columns: ["VendorID"],
+                        conditions: [
+                            {"columnName": "trip_distance", "operator": "BETWEEN", "value": [5, 50]},
+                            {"columnName": "fare_amount", "operator": "GREATER_THAN", "value": 10},
+                            {"columnName": "VendorID", "operator": "IN", "value": [1, 2, 3, 4]}
+                        ],
+                        groupBy: ["VendorID"],
+                        aggregates: {
+                            "COUNT_STAR": "COUNT",
+                            "AVG_fare_amount": "AVG",
+                            "SUM_total_amount": "SUM",
+                            "AVG_trip_distance": "AVG",
+                            "MAX_trip_distance": "MAX"
+                        },
+                        havingConditions: [
+                            {"columnName": "COUNT_STAR", "operator": "GREATER_THAN", "value": 100},
+                            {"columnName": "AVG_fare_amount", "operator": "GREATER_THAN", "value": 30}
+                        ],
+                        orderBy: [{"column": "AVG_fare_amount", "ascending": false}],
+                        distributed: true
+                    };
+                    break;
+                    
+                case 'vip-segments':
+                    // Segments VIP - Combinaison de tous les opérateurs avancés
+                    query = {
+                        tableName: "parquet_file",
+                        columns: ["PULocationID", "payment_type"],
+                        conditions: [
+                            {"columnName": "PULocationID", "operator": "IN", "value": [1, 4, 7, 13, 48, 50, 68, 79, 87, 90, 100, 107, 113, 114, 125, 127, 128, 140, 141, 142, 148, 151, 152, 158, 161, 162, 163, 164, 166, 170, 186, 194, 202, 209, 211, 224, 229, 230, 231, 232, 233, 234, 236, 237, 238, 239, 243, 244, 246, 249, 261, 262, 263]},
+                            {"columnName": "payment_type", "operator": "IN", "value": [1, 2]},
+                            {"columnName": "fare_amount", "operator": "BETWEEN", "value": [15, 200]},
+                            {"columnName": "tip_amount", "operator": "GREATER_THAN", "value": 3},
+                            {"columnName": "passenger_count", "operator": "BETWEEN", "value": [1, 4]}
+                        ],
+                        groupBy: ["PULocationID", "payment_type"],
+                        aggregates: {
+                            "COUNT_STAR": "COUNT",
+                            "SUM_total_amount": "SUM",
+                            "AVG_fare_amount": "AVG",
+                            "AVG_tip_amount": "AVG",
+                            "AVG_trip_distance": "AVG"
+                        },
+                        havingConditions: [
+                            {"columnName": "COUNT_STAR", "operator": "GREATER_THAN", "value": 200},
+                            {"columnName": "AVG_fare_amount", "operator": "BETWEEN", "value": [25, 150]},
+                            {"columnName": "AVG_tip_amount", "operator": "GREATER_THAN", "value": 5},
+                            {"columnName": "SUM_total_amount", "operator": "GREATER_THAN", "value": 10000}
+                        ],
+                        orderBy: [{"column": "SUM_total_amount", "ascending": false}],
+                        limit: 20,
+                        distributed: true
+                    };
+                    break;
+                    
+                case 'performance':
+                    // Benchmark de performance sur l'ensemble des données
+                    query = {
+                        tableName: "parquet_file",
+                        columns: ["*"],
+                        conditions: [
+                            {"columnName": "trip_distance", "operator": "GREATER_THAN", "value": 0},
+                            {"columnName": "fare_amount", "operator": "GREATER_THAN", "value": 0}
+                        ],
+                        aggregates: {
+                            "COUNT_STAR": "COUNT",
+                            "AVG_trip_distance": "AVG",
+                            "MAX_trip_distance": "MAX",
+                            "AVG_fare_amount": "AVG",
+                            "SUM_total_amount": "SUM"
+                        },
+                        distributed: true
+                    };
+                    break;
+                    
+                default:
+                    query = {
+                        tableName: "parquet_file",
+                        columns: ["VendorID", "passenger_count", "trip_distance", "fare_amount", "total_amount"],
+                        orderBy: [{"column": "total_amount", "ascending": false}],
+                        distributed: true
+                    };
+            }
+            
+            console.log(`🔍 Executing ${type} analysis:`, query);
+            
+            const result = await apiCall('/api/query', 'POST', query);
+            const queryTime = Date.now() - startTime;
+            
+            updateMetrics({ queryTime });
+            
+            let analysisTitle = '';
+            switch(type) {
+                case 'overview': analysisTitle = '📊 VUE D\'ENSEMBLE GLOBALE'; break;
+                case 'sample-data': analysisTitle = '📋 ÉCHANTILLON DE DONNÉES BRUTES'; break;
+                case 'expensive-trips': analysisTitle = '💰 TRAJETS LES PLUS CHERS'; break;
+                case 'vendor-performance': analysisTitle = '🚕 PERFORMANCE DES VENDEURS PREMIUM'; break;
+                case 'pickup-zones': analysisTitle = '📍 TOP ZONES DE PICKUP PREMIUM'; break;
+                case 'payment-analysis': analysisTitle = '💳 ANALYSE PAIEMENTS PREMIUM'; break;
+                case 'passenger-analysis': analysisTitle = '👥 ANALYSE GROUPES RENTABLES'; break;
+                case 'distance-analysis': analysisTitle = '📏 ANALYSE TRAJETS LONGUE DISTANCE'; break;
+                case 'vip-segments': analysisTitle = '🏆 ANALYSE SEGMENTS VIP'; break;
+                case 'performance': analysisTitle = '⚡ BENCHMARK DE PERFORMANCE'; break;
+                default: analysisTitle = '📊 ANALYSE GÉNÉRALE';
+            }
+            
+            if (result.success) {
+                const rowCount = result.data && result.data.length ? result.data.length : 0;
+                let totalRows = 0;
+                
+                // Try to extract total count from aggregation results
+                if (result.data && result.data.length > 0 && result.data[0].COUNT_STAR) {
+                    totalRows = result.data[0].COUNT_STAR;
+                } else if (result.data && result.data.length > 0 && result.data[0].count) {
+                    totalRows = result.data.reduce((sum, row) => sum + (row.count || 0), 0);
+                }
+                
+                updateResult('analyticsResult', 
+                    `${analysisTitle}\n` +
+                    `⏱️ Temps d'exécution: ${queryTime}ms\n` +
+                    `📊 Groupes de résultats: ${rowCount.toLocaleString()}\n` +
+                    (totalRows > 0 ? `📈 Total lignes traitées: ${totalRows.toLocaleString()}\n` : '') +
+                    `🚀 Performance: ${totalRows > 0 ? Math.round(totalRows / (queryTime / 1000)).toLocaleString() : rowCount > 0 ? Math.round(rowCount / (queryTime / 1000)).toLocaleString() : 0} lignes/sec\n\n` +
+                    `${formatJSON(result.data)}`
+                );
+            } else {
+                updateResult('analyticsResult', 
+                    `${analysisTitle}\n` +
+                    `❌ Erreur après ${queryTime}ms:\n${result.error}\n\n` +
+                    `💡 Diagnostic:\n` +
+                    `1. Testez d'abord: 🔍 Test Basique\n` +
+                    `2. Vérifiez les statistiques de table\n` +
+                    `3. Consultez les logs du serveur MemoryDB\n` +
+                    `4. Essayez 📊 Vue d'Ensemble (plus simple)`,
+                    true
+                );
+            }
+            hideLoading();
+        }
+
+        // Tests des nouveaux opérateurs SQL avancés
+        async function testStringOperators() {
+            showLoading();
+            const startTime = Date.now();
+            
+            const query = {
+                tableName: "parquet_file",
+                columns: ["VendorID", "payment_type"],
+                conditions: [
+                    {"columnName": "payment_type", "operator": "CONTAINS", "value": "1"}
+                ],
+                limit: 100,
+                distributed: true
+            };
+            
+            const result = await apiCall('/api/query', 'POST', query);
+            const queryTime = Date.now() - startTime;
+            
+            updateResult('analyticsResult', 
+                result.success ? 
+                `🔍 TEST OPÉRATEUR CONTAINS RÉUSSI\n⏱️ Temps: ${queryTime}ms\n📊 Résultats: ${result.data.length}\n\n${formatJSON(result.data)}` :
+                `❌ Test CONTAINS échoué: ${result.error}`,
+                !result.success
+            );
+            hideLoading();
+        }
+
+        async function testInOperator() {
+            showLoading();
+            const startTime = Date.now();
+            
+            const query = {
+                tableName: "parquet_file",
+                columns: ["VendorID"],
+                conditions: [
+                    {"columnName": "VendorID", "operator": "IN", "value": [1, 2]}
+                ],
+                groupBy: ["VendorID"],
+                aggregates: {"COUNT_STAR": "COUNT"},
+                limit: 10,
+                distributed: true
+            };
+            
+            const result = await apiCall('/api/query', 'POST', query);
+            const queryTime = Date.now() - startTime;
+            
+            updateResult('analyticsResult', 
+                result.success ? 
+                `📊 TEST OPÉRATEUR IN RÉUSSI\n⏱️ Temps: ${queryTime}ms\n📊 Résultats: ${result.data.length}\n\n${formatJSON(result.data)}` :
+                `❌ Test IN échoué: ${result.error}`,
+                !result.success
+            );
+            hideLoading();
+        }
+
+        async function testBetweenOperator() {
+            showLoading();
+            const startTime = Date.now();
+            
+            const query = {
+                tableName: "parquet_file",
+                columns: ["trip_distance", "fare_amount"],
+                conditions: [
+                    {"columnName": "fare_amount", "operator": "BETWEEN", "value": [10, 50]}
+                ],
+                limit: 100,
+                distributed: true
+            };
+            
+            const result = await apiCall('/api/query', 'POST', query);
+            const queryTime = Date.now() - startTime;
+            
+            updateResult('analyticsResult', 
+                result.success ? 
+                `🎯 TEST OPÉRATEUR BETWEEN RÉUSSI\n⏱️ Temps: ${queryTime}ms\n📊 Résultats: ${result.data.length}\n\n${formatJSON(result.data)}` :
+                `❌ Test BETWEEN échoué: ${result.error}`,
+                !result.success
+            );
+            hideLoading();
+        }
+
+        async function testHavingClause() {
+            showLoading();
+            const startTime = Date.now();
+            
+            const query = {
+                tableName: "parquet_file",
+                columns: ["VendorID"],
+                groupBy: ["VendorID"],
+                aggregates: {"COUNT_STAR": "COUNT", "AVG_fare_amount": "AVG"},
+                havingConditions: [
+                    {"columnName": "COUNT_STAR", "operator": "GREATER_THAN", "value": 1000},
+                    {"columnName": "AVG_fare_amount", "operator": "GREATER_THAN", "value": 10}
+                ],
+                limit: 10,
+                distributed: true
+            };
+            
+            const result = await apiCall('/api/query', 'POST', query);
+            const queryTime = Date.now() - startTime;
+            
+            updateResult('analyticsResult', 
+                result.success ? 
+                `🔥 TEST CLAUSE HAVING RÉUSSI\n⏱️ Temps: ${queryTime}ms\n📊 Résultats: ${result.data.length}\n\n${formatJSON(result.data)}` :
+                `❌ Test HAVING échoué: ${result.error}`,
+                !result.success
+            );
+            hideLoading();
+        }
+
         // Initialisation
         document.addEventListener('DOMContentLoaded', function() {
             checkClusterHealth();
