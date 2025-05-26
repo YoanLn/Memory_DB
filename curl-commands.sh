@@ -6,7 +6,7 @@
 NODE1="localhost:8081"
 NODE2="localhost:8082"
 NODE3="localhost:8083"
-PARQUET_FILE="data/test2.parquet"
+PARQUET_FILE="data/test5.parquet"
 
 # Pour un déploiement sur des machines physiques, modifiez ces valeurs:
 #NODE1="192.168.1.101:8080"

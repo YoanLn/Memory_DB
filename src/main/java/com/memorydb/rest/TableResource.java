@@ -1283,7 +1283,7 @@ public class TableResource {
             @PathParam("tableName") String tableName,
             InputStream inputStream,
             @QueryParam("rowLimit") @DefaultValue("-1") long rowLimit,
-            @QueryParam("batchSize") @DefaultValue("100000") int batchSize,
+            @QueryParam("batchSize") @DefaultValue("200000") int batchSize,
             @QueryParam("skipRows") @DefaultValue("0") int skipRows) {
         try {
             // Vérifie que la table existe
@@ -1352,7 +1352,7 @@ public class TableResource {
         public String filePath;
         public String file; // Alias pour filePath (pour compatibilité)
         public long rowLimit = -1;
-        public int batchSize = 100000;
+        public int batchSize = 200000;
     }
     
     /**
@@ -1603,23 +1603,24 @@ public class TableResource {
                                 Object stringObj = columnData.get("values");
                                 if (stringObj instanceof String[]) {
                                     String[] stringValues = (String[]) stringObj;
-                                    // Optimisation: interning des chaînes pour réduire l'usage mémoire
-                                    tableData.getColumnStore(colIndex).addString(stringValues[rowIndex] != null ? 
-                                                                                stringValues[rowIndex].intern() : null);
+                                    // Skip string interning for better performance during bulk loading
+                                    tableData.getColumnStore(colIndex).addString(stringValues[rowIndex]);
                                 } else if (stringObj instanceof List) {
                                     List<?> stringList = (List<?>) stringObj;
                                     Object value = stringList.get(rowIndex);
-                                    // Optimisation: interning des chaînes pour réduire l'usage mémoire
+                                    // Skip string interning for better performance during bulk loading
                                     tableData.getColumnStore(colIndex).addString(value != null ? 
-                                                                                value.toString().intern() : null);
+                                                                                value.toString() : null);
                                 }
                                 break;
                         }
                     }
                     
-                    // Incrémente le compteur de lignes sans créer de tableau temporaire
-                    tableData.incrementRowCount();
+                    // Note: Row count will be incremented in bulk after the loop
                 }
+                
+                // Bulk increment row count for much better performance
+                tableData.incrementRowCount(rowCount);
                 
                 logger.info("[Remote Batch Columnar] Ajout de {} lignes à la table {}", rowCount, tableName);
                 

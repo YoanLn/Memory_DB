@@ -42,6 +42,7 @@ import java.nio.channels.Channels;
 import java.nio.channels.ReadableByteChannel;
 
 import java.util.*;
+import java.util.Arrays;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
@@ -72,6 +73,10 @@ public class VectorizedParquetLoader {
     // Reusable objects cache to reduce GC pressure
     private ThreadLocal<ValueCache> valueCache = ThreadLocal.withInitial(ValueCache::new);
     
+    // Reusable buffer for temporary file operations
+    private static final int BUFFER_SIZE = 256 * 1024; // 256KB buffer
+    private ThreadLocal<byte[]> bufferCache = ThreadLocal.withInitial(() -> new byte[BUFFER_SIZE]);
+    
     /**
      * Cache of primitive and reusable values to reduce object creation during row extraction
      */
@@ -99,6 +104,14 @@ public class VectorizedParquetLoader {
                 doubleValues = new double[size];
                 boolValues = new boolean[size];
                 lastSize = size;
+            }
+        }
+        
+        // Clear references to help GC
+        void clear() {
+            if (values != null) {
+                Arrays.fill(values, null);
+                Arrays.fill(stringValues, null);
             }
         }
     }
@@ -142,11 +155,14 @@ public class VectorizedParquetLoader {
         Path path = new Path(filePath);
         Configuration conf = new Configuration();
         
-        // Indique à Hadoop et Parquet de garder les fichiers ouverts
-        // Ces paramètres permettent d'améliorer les performances en réduisant les opérations I/O
+        // Optimized Parquet configuration for memory efficiency
         conf.set("fs.hdfs.impl.disable.cache", "false");
         conf.set("parquet.read.support.class", "org.apache.parquet.hadoop.example.GroupReadSupport");
         conf.set("parquet.filter.record-level.enabled", "true");
+        // Memory optimizations
+        conf.set("parquet.page.size", "1048576"); // 1MB page size for better memory usage
+        conf.set("parquet.dictionary.page.size", "1048576"); // 1MB dictionary page size
+        conf.setInt("parquet.read.allocation.size", 8 * 1024 * 1024); // 8MB read buffer
         
         try (ParquetFileReader schemaReader = ParquetFileReader.open(HadoopInputFile.fromPath(path, conf))) {
             MessageType schema = schemaReader.getFooter().getFileMetaData().getSchema();
@@ -252,7 +268,9 @@ public class VectorizedParquetLoader {
                             batchData.clear();
                             batchCount++;
                             
-                            if (batchCount % 10 == 0) {
+                            // Clear value cache and log less frequently for better performance
+                            if (batchCount % 50 == 0) {
+                                valueCache.get().clear();
                                 logger.info("Chargés: {} lignes, {} batchs, {} sec", 
                                     totalRows, batchCount, (System.currentTimeMillis() - startTime) / 1000);
                             }
@@ -313,100 +331,75 @@ public class VectorizedParquetLoader {
         
         tableData.writeLock();
         try {
-            // Traite le batch ligne par ligne
-            for (Object[] rowValues : batchData) {
-                // Vérification pour éviter les problèmes d'index
-                if (rowValues.length != columnCount) {
-                    throw new IllegalArgumentException("Nombre de valeurs incorrect, attendu: " + 
-                        columnCount + ", obtenu: " + rowValues.length);
-                }
-                
-                // Extrait les valeurs dans les tableaux primitifs appropriés
-                for (int i = 0; i < columnCount; i++) {
-                    Object value = rowValues[i];
-                    ColumnStore columnStore = tableData.getColumnStore(i);
+                                // Optimized batch processing with reduced method calls
+                    int batchRowCount = batchData.size();
                     
-                    if (value == null) {
-                        columnStore.addNull();
-                        continue;
+                    // Pre-allocate arrays for bulk operations
+                    ColumnStore[] columnStores = new ColumnStore[columnCount];
+                    for (int i = 0; i < columnCount; i++) {
+                        columnStores[i] = tableData.getColumnStore(i);
                     }
                     
-                    // Utilise un switch sans boxing/unboxing quand possible
-                    switch (columnStore.getType()) {
-                        case INTEGER:
-                            if (value instanceof Integer) {
-                                columnStore.addInt((Integer) value);
-                            } else if (value instanceof Number) {
-                                // Conversion sans création d'objet intermédiaire
-                                columnStore.addInt(((Number) value).intValue());
-                            } else {
-                                columnStore.addInt(Integer.parseInt(value.toString()));
+                    // Process batch with minimal object creation
+                    for (int rowIdx = 0; rowIdx < batchRowCount; rowIdx++) {
+                        Object[] rowValues = batchData.get(rowIdx);
+                        
+                        // Quick validation
+                        if (rowValues.length != columnCount) {
+                            throw new IllegalArgumentException("Nombre de valeurs incorrect, attendu: " + 
+                                columnCount + ", obtenu: " + rowValues.length);
+                        }
+                        
+                        // Process all columns for this row
+                        for (int colIdx = 0; colIdx < columnCount; colIdx++) {
+                            Object value = rowValues[colIdx];
+                            ColumnStore columnStore = columnStores[colIdx];
+                            
+                            if (value == null) {
+                                columnStore.addNull();
+                                continue;
                             }
-                            break;
-                        case LONG:
-                            if (value instanceof Long) {
-                                columnStore.addLong((Long) value);
-                            } else if (value instanceof Number) {
-                                // Conversion sans création d'objet intermédiaire
-                                columnStore.addLong(((Number) value).longValue());
-                            } else {
-                                columnStore.addLong(Long.parseLong(value.toString()));
+                            
+                            // Optimized type handling with fewer instanceof checks
+                            switch (columnStore.getType()) {
+                                case INTEGER:
+                                    columnStore.addInt(value instanceof Integer ? 
+                                        (Integer) value : ((Number) value).intValue());
+                                    break;
+                                case LONG:
+                                    columnStore.addLong(value instanceof Long ? 
+                                        (Long) value : ((Number) value).longValue());
+                                    break;
+                                case FLOAT:
+                                    columnStore.addFloat(value instanceof Float ? 
+                                        (Float) value : ((Number) value).floatValue());
+                                    break;
+                                case DOUBLE:
+                                    columnStore.addDouble(value instanceof Double ? 
+                                        (Double) value : ((Number) value).doubleValue());
+                                    break;
+                                case BOOLEAN:
+                                    columnStore.addBoolean(value instanceof Boolean ? 
+                                        (Boolean) value : Boolean.parseBoolean(value.toString()));
+                                    break;
+                                case STRING:
+                                    // Avoid string interning for better memory performance
+                                    columnStore.addString(value instanceof String ? 
+                                        (String) value : value.toString());
+                                    break;
+                                case DATE:
+                                case TIMESTAMP:
+                                    columnStore.addDate(value instanceof Long ? 
+                                        (Long) value : ((Number) value).longValue());
+                                    break;
+                                default:
+                                    throw new IllegalArgumentException("Type non supporté: " + columnStore.getType());
                             }
-                            break;
-                        case FLOAT:
-                            if (value instanceof Float) {
-                                columnStore.addFloat((Float) value);
-                            } else if (value instanceof Number) {
-                                // Conversion sans création d'objet intermédiaire
-                                columnStore.addFloat(((Number) value).floatValue());
-                            } else {
-                                columnStore.addFloat(Float.parseFloat(value.toString()));
-                            }
-                            break;
-                        case DOUBLE:
-                            if (value instanceof Double) {
-                                columnStore.addDouble((Double) value);
-                            } else if (value instanceof Number) {
-                                // Conversion sans création d'objet intermédiaire
-                                columnStore.addDouble(((Number) value).doubleValue());
-                            } else {
-                                columnStore.addDouble(Double.parseDouble(value.toString()));
-                            }
-                            break;
-                        case BOOLEAN:
-                            if (value instanceof Boolean) {
-                                columnStore.addBoolean((Boolean) value);
-                            } else {
-                                columnStore.addBoolean(Boolean.parseBoolean(value.toString()));
-                            }
-                            break;
-                        case STRING:
-                            // Utilise directement .intern() pour réduire les duplications de string
-                            if (value instanceof String) {
-                                columnStore.addString(((String) value).intern());
-                            } else {
-                                columnStore.addString(value.toString().intern());
-                            }
-                            break;
-                        case DATE:
-                        case TIMESTAMP:
-                            if (value instanceof Long) {
-                                columnStore.addDate((Long) value);
-                            } else if (value instanceof Number) {
-                                // Conversion sans création d'objet intermédiaire
-                                columnStore.addDate(((Number) value).longValue());
-                            } else {
-                                columnStore.addDate(Long.parseLong(value.toString()));
-                            }
-                            break;
-                        default:
-                            throw new IllegalArgumentException("Type non supporté: " + columnStore.getType());
+                        }
                     }
-                }
-                
-                // Incrémente le compteur de lignes
-                tableData.incrementRowCount();
-            }
+                    
+                    // Bulk increment row count - much faster than individual increments
+                    tableData.incrementRowCount(batchRowCount);
             
             logger.debug("Batch de {} lignes ajouté à la table", batchSize);
         } finally {
@@ -472,8 +465,8 @@ public class VectorizedParquetLoader {
                     break;
                 case STRING:
                     Binary binary = group.getBinary(fieldName, 0);
-                    // Use string interning to reduce memory usage for repeated strings
-                    stringValues[i] = binary.toStringUsingUTF8().intern();
+                    // Avoid string interning for better performance - let GC handle duplicates
+                    stringValues[i] = binary.toStringUsingUTF8();
                     values[i] = stringValues[i];
                     break;
                 case DATE:
@@ -731,18 +724,16 @@ public class VectorizedParquetLoader {
             tempFile = File.createTempFile("parquet_stream_", ".parquet", tempDir);
             tempFile.deleteOnExit(); // Garantit la suppression à la fin
             
-            // Tranfère le flux en utilisant NIO pour plus d'efficacité
-            try (ReadableByteChannel readChannel = Channels.newChannel(inputStream);
+            // Use reusable buffer for better memory efficiency
+            byte[] buffer = bufferCache.get();
+            long totalBytes = 0;
+            
+            try (BufferedInputStream bis = new BufferedInputStream(inputStream, BUFFER_SIZE);
                  FileOutputStream fileOS = new FileOutputStream(tempFile)) {
                 
-                ByteBuffer buffer = ByteBuffer.allocateDirect(64 * 1024); // Buffer de 64KB
-                long totalBytes = 0;
                 int bytesRead;
-                
-                while ((bytesRead = readChannel.read(buffer)) != -1) {
-                    buffer.flip();
-                    fileOS.getChannel().write(buffer);
-                    buffer.clear();
+                while ((bytesRead = bis.read(buffer)) != -1) {
+                    fileOS.write(buffer, 0, bytesRead);
                     totalBytes += bytesRead;
                     
                     if (totalBytes % (10 * 1024 * 1024) == 0) { // Log tous les 10MB
@@ -799,15 +790,14 @@ public class VectorizedParquetLoader {
             tempFile = File.createTempFile("parquet_count_", ".parquet", tempDir);
             tempFile.deleteOnExit(); // Garantit la suppression à la fin
             
-            // Transfert le flux efficacement
-            try (ReadableByteChannel readChannel = Channels.newChannel(inputStream);
+            // Use reusable buffer for efficient transfer
+            byte[] buffer = bufferCache.get();
+            try (BufferedInputStream bis = new BufferedInputStream(inputStream, BUFFER_SIZE);
                  FileOutputStream fileOS = new FileOutputStream(tempFile)) {
                 
-                ByteBuffer buffer = ByteBuffer.allocateDirect(64 * 1024); // Buffer de 64KB
-                while (readChannel.read(buffer) != -1) {
-                    buffer.flip();
-                    fileOS.getChannel().write(buffer);
-                    buffer.clear();
+                int bytesRead;
+                while ((bytesRead = bis.read(buffer)) != -1) {
+                    fileOS.write(buffer, 0, bytesRead);
                 }
             }
             
@@ -853,14 +843,15 @@ public class VectorizedParquetLoader {
         ParquetLoadStats stats = new ParquetLoadStats();
         long startTime = System.currentTimeMillis();
         
-        // More efficient streaming with larger buffers
-        ByteArrayOutputStream baos = new ByteArrayOutputStream(8 * 1024 * 1024); // Pre-allocate 8MB to reduce reallocations
+        // Use reusable buffer for efficient streaming
+        byte[] reusableBuffer = bufferCache.get();
+        ByteArrayOutputStream baos = new ByteArrayOutputStream(4 * 1024 * 1024); // Start with 4MB
         long totalBytesTransferred = 0;
-        try (InputStream bufferedInputStream = new BufferedInputStream(inputStream, 256 * 1024)) { // 256KB buffer
-            byte[] byteParquetLoaderBuffer = new byte[512 * 1024]; // 512KB read buffer for better throughput
+        
+        try (BufferedInputStream bufferedInputStream = new BufferedInputStream(inputStream, BUFFER_SIZE)) {
             int bytesRead;
-            while ((bytesRead = bufferedInputStream.read(byteParquetLoaderBuffer)) != -1) {
-                baos.write(byteParquetLoaderBuffer, 0, bytesRead);
+            while ((bytesRead = bufferedInputStream.read(reusableBuffer)) != -1) {
+                baos.write(reusableBuffer, 0, bytesRead);
                 totalBytesTransferred += bytesRead;
             }
         }
@@ -954,7 +945,7 @@ public class VectorizedParquetLoader {
                         com.memorydb.distribution.NodeInfo currentNode = nodes[actualNodeIndex];
                         String nodeId = currentNode.getId();
                         
-                        if (currentRow % 100000 == 0) {
+                        if (currentRow % 500000 == 0) {
                             logger.info("[{}] Ligne {} attribuée au nœud {} (index {})", 
                                 sessionId, currentRow, nodeId, actualNodeIndex);
                         }
@@ -988,33 +979,24 @@ public class VectorizedParquetLoader {
                                 nodeRows.put(finalNodeId, previousCount + finalBatchSize);
                                 stats.addNodeRows(finalNodeId, finalBatchSize);
                             } else {
-                                // For remote nodes, use CompletableFuture to process batches in parallel
-                                CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
-                                    try {
-                                        // Send batch to remote node asynchronously
-                                        sendBatchToRemoteNode(finalNode, tableName, batchToProcess);
-                                        
-                                        // Update stats after successful send
-                                        synchronized (nodeRows) {
-                                            long previousCount = nodeRows.get(finalNodeId);
-                                            nodeRows.put(finalNodeId, previousCount + finalBatchSize);
-                                            stats.addNodeRows(finalNodeId, finalBatchSize);
-                                        }
-                                    } catch (Exception e) {
-                                        logger.error("[{}] Erreur lors de l'envoi asynchrone des données au nœud {}: {}", 
-                                                sessionId, finalNodeId, e.getMessage(), e);
-                                        // We don't throw here since we're in an async context
-                                        // Instead we log the error and continue
-                                    }
-                                });
-                                // Track this operation
-                                pendingOperations.add(future);
+                                // For remote nodes, send synchronously to reduce async overhead
+                                try {
+                                    sendBatchToRemoteNode(finalNode, tableName, batchToProcess);
+                                    
+                                    // Update stats after successful send
+                                    long previousCount = nodeRows.get(finalNodeId);
+                                    nodeRows.put(finalNodeId, previousCount + finalBatchSize);
+                                    stats.addNodeRows(finalNodeId, finalBatchSize);
+                                } catch (Exception e) {
+                                    logger.error("[{}] Erreur lors de l'envoi des données au nœud {}: {}", 
+                                            sessionId, finalNodeId, e.getMessage(), e);
+                                }
                             }
                             
                             batch.clear();
                             currentRowsInBatch = 0;
                             
-                            if (currentRow % 100000 == 0) {
+                            if (currentRow % 500000 == 0) {
                                 logger.info("[{}] Progress: {} rows processed. Distribution actuelle: {}", 
                                            sessionId, currentRow, nodeRows);
                             }
@@ -1051,23 +1033,18 @@ public class VectorizedParquetLoader {
                             nodeRows.put(finalBatchNodeId, previousCount + finalBatchSize);
                             stats.addNodeRows(finalBatchNodeId, finalBatchSize);
                         } else {
-                            // For remote nodes, process asynchronously
-                            CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
-                                try {
-                                    sendBatchToRemoteNode(finalBatchNode, tableName, finalBatch);
-                                    
-                                    // Update stats after successful send
-                                    synchronized (nodeRows) {
-                                        long prevCount = nodeRows.get(finalBatchNodeId);
-                                        nodeRows.put(finalBatchNodeId, prevCount + finalBatchSize);
-                                        stats.addNodeRows(finalBatchNodeId, finalBatchSize);
-                                    }
-                                } catch (Exception e) {
-                                    logger.error("[{}] Erreur lors de l'envoi asynchrone du batch final au nœud {}: {}", 
-                                             sessionId, finalBatchNodeId, e.getMessage(), e);
-                                }
-                            });
-                            pendingOperations.add(future);
+                            // For remote nodes, send synchronously for final batch
+                            try {
+                                sendBatchToRemoteNode(finalBatchNode, tableName, finalBatch);
+                                
+                                // Update stats after successful send
+                                long prevCount = nodeRows.get(finalBatchNodeId);
+                                nodeRows.put(finalBatchNodeId, prevCount + finalBatchSize);
+                                stats.addNodeRows(finalBatchNodeId, finalBatchSize);
+                            } catch (Exception e) {
+                                logger.error("[{}] Erreur lors de l'envoi du batch final au nœud {}: {}", 
+                                         sessionId, finalBatchNodeId, e.getMessage(), e);
+                            }
                         }
                     }
                     
@@ -1079,15 +1056,7 @@ public class VectorizedParquetLoader {
                 }
             }
             
-            // Wait for all pending async operations to complete before returning
-            if (!pendingOperations.isEmpty()) {
-                logger.info("[{}] Waiting for {} pending batch operations to complete", sessionId, pendingOperations.size());
-                try {
-                    CompletableFuture.allOf(pendingOperations.toArray(new CompletableFuture[0])).join();
-                } catch (Exception e) {
-                    logger.error("[{}] Error waiting for async batch operations: {}", sessionId, e.getMessage(), e);
-                }
-            }
+            // No need to wait for async operations since we're now using synchronous sends
             
             return stats;
         } catch (Exception e) {
@@ -1300,5 +1269,9 @@ public class VectorizedParquetLoader {
         if (executorService != null && !executorService.isShutdown()) {
             executorService.shutdown();
         }
+        
+        // Clear thread-local caches to help with memory cleanup
+        valueCache.remove();
+        bufferCache.remove();
     }
 }

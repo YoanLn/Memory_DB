@@ -103,10 +103,8 @@ public class ColumnStore {
         ensureCapacity(size + 1);
         intValues[size] = value;
         
-        // Mettre à jour l'index bitmap si activé
-        if (intIndex != null && intIndex.isEnabled()) {
-            intIndex.add(value, size);
-        }
+        // Skip bitmap index updates during bulk loading for better performance
+        // Index can be rebuilt later if needed
         
         size++;
     }
@@ -119,10 +117,7 @@ public class ColumnStore {
         ensureCapacity(size + 1);
         longValues[size] = value;
         
-        // Mettre à jour l'index bitmap si activé
-        if (longIndex != null && longIndex.isEnabled()) {
-            longIndex.add(value, size);
-        }
+        // Skip bitmap index updates during bulk loading for better performance
         
         size++;
     }
@@ -135,10 +130,7 @@ public class ColumnStore {
         ensureCapacity(size + 1);
         floatValues[size] = value;
         
-        // Mettre à jour l'index bitmap si activé
-        if (floatIndex != null && floatIndex.isEnabled()) {
-            floatIndex.add(value, size);
-        }
+        // Skip bitmap index updates during bulk loading for better performance
         
         size++;
     }
@@ -151,10 +143,7 @@ public class ColumnStore {
         ensureCapacity(size + 1);
         doubleValues[size] = value;
         
-        // Mettre à jour l'index bitmap si activé
-        if (doubleIndex != null && doubleIndex.isEnabled()) {
-            doubleIndex.add(value, size);
-        }
+        // Skip bitmap index updates during bulk loading for better performance
         
         size++;
     }
@@ -167,10 +156,7 @@ public class ColumnStore {
         ensureCapacity(size + 1);
         booleanValues[size] = value;
         
-        // Mettre à jour l'index bitmap si activé
-        if (boolIndex != null && boolIndex.isEnabled()) {
-            boolIndex.add(value, size);
-        }
+        // Skip bitmap index updates during bulk loading for better performance
         
         size++;
     }
@@ -188,9 +174,7 @@ public class ColumnStore {
             return;
         }
         
-        // Réutiliser les chaînes identiques via l'interning pour réduire la consommation mémoire
-        value = value.intern();
-        
+        // Skip string interning for better performance - dictionary compression is sufficient
         // Compression par dictionnaire
         Integer dictIndex = stringDictionary.get(value);
         if (dictIndex == null) {
@@ -211,10 +195,8 @@ public class ColumnStore {
         
         stringDictionaryIndex[size] = dictIndex;
         
-        // Mettre à jour l'index bitmap si activé
-        if (stringIndex != null && stringIndex.isEnabled()) {
-            stringIndex.add(value, size);
-        }
+        // Skip bitmap index updates during bulk loading for better performance
+        // Index can be rebuilt later if needed
         
         size++;
     }

@@ -182,4 +182,17 @@ public class TableData {
             lock.writeLock().unlock();
         }
     }
+    
+    /**
+     * Incrémente le compteur de lignes par un nombre spécifique (optimisation pour les batches)
+     * ATTENTION: Cette méthode doit être appelée uniquement après avoir ajouté toutes les valeurs de colonne
+     */
+    public void incrementRowCount(int count) {
+        lock.writeLock().lock();
+        try {
+            rowCount += count;
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
 } 
