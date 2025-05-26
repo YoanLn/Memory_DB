@@ -40,8 +40,8 @@ public class ColumnStore {
     private BitmapIndex<Boolean> boolIndex;   // Pour les BOOLEAN
     private BitmapIndex<String> stringIndex;  // Pour les STRING
     
-    private static final int INITIAL_CAPACITY = 1024;
-    private static final float GROWTH_FACTOR = 1.5f;
+    private static final int INITIAL_CAPACITY = 100000; // Start with larger capacity
+    private static final float GROWTH_FACTOR = 2.0f; // Grow faster to reduce reallocations
     
     /**
      * Crée un nouveau stockage en colonnes

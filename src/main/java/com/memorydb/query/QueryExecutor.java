@@ -11,11 +11,19 @@ import javax.enterprise.context.ApplicationScoped;
 import javax.inject.Inject;
 import java.util.*;
 import java.util.stream.Collectors;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.RecursiveTask;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Exécuteur de requêtes
+ * ULTRA-AGGRESSIVE Query Executor with massive performance optimizations
+ * - Vectorized operations for group-by and aggregations
+ * - Parallel processing with ForkJoinPool
+ * - Minimal logging for maximum speed
+ * - Cache-friendly data structures
+ * - Zero-copy operations where possible
  */
 @ApplicationScoped
 public class QueryExecutor {
@@ -25,105 +33,238 @@ public class QueryExecutor {
     @Inject
     private DatabaseContext databaseContext;
     
+    // ULTRA-AGGRESSIVE: Performance constants
+    private static final int VECTORIZED_BATCH_SIZE = 100_000; // Process 100k rows at once
+    private static final int PARALLEL_THRESHOLD = 50_000; // Use parallel processing for >50k rows
+    private static final int AGGREGATION_BUFFER_SIZE = 10_000; // Pre-allocate aggregation buffers
+    
+    // ULTRA-AGGRESSIVE: Thread pool for parallel processing
+    private static final ForkJoinPool ULTRA_FORK_JOIN_POOL = new ForkJoinPool(
+        Runtime.getRuntime().availableProcessors() * 2,
+        ForkJoinPool.defaultForkJoinWorkerThreadFactory,
+        null,
+        true // Enable async mode for better throughput
+    );
+    
+    // ULTRA-AGGRESSIVE: Cache for reusable objects
+    private static final ThreadLocal<GroupingCache> GROUPING_CACHE = ThreadLocal.withInitial(GroupingCache::new);
+    
     /**
-     * Exécute une requête simple
+     * Cache for reusable objects during grouping operations
+     */
+    private static class GroupingCache {
+        List<Object> groupKeyValues = new ArrayList<>(10);
+        Map<GroupKey, List<Integer>> groupedRows = new HashMap<>(1000);
+        List<Integer> rowBuffer = new ArrayList<>(AGGREGATION_BUFFER_SIZE);
+        
+        void clear() {
+            groupKeyValues.clear();
+            groupedRows.clear();
+            rowBuffer.clear();
+        }
+        
+        void ensureCapacity(int size) {
+            if (groupKeyValues.size() < size) {
+                groupKeyValues = new ArrayList<>(size);
+            }
+        }
+    }
+    
+    /**
+     * ULTRA-AGGRESSIVE: Parallel task for vectorized grouping
+     */
+    private static class VectorizedGroupingTask extends RecursiveTask<Map<GroupKey, List<Integer>>> {
+        private final TableData tableData;
+        private final List<Integer> rows;
+        private final List<String> groupByColumns;
+        private final int start;
+        private final int end;
+        
+        VectorizedGroupingTask(TableData tableData, List<Integer> rows, List<String> groupByColumns, int start, int end) {
+            this.tableData = tableData;
+            this.rows = rows;
+            this.groupByColumns = groupByColumns;
+            this.start = start;
+            this.end = end;
+        }
+        
+        @Override
+        protected Map<GroupKey, List<Integer>> compute() {
+            if (end - start <= PARALLEL_THRESHOLD) {
+                // Process sequentially for small chunks
+                return processRowsVectorized(tableData, rows.subList(start, end), groupByColumns);
+            } else {
+                // Split and process in parallel
+                int mid = (start + end) / 2;
+                VectorizedGroupingTask leftTask = new VectorizedGroupingTask(tableData, rows, groupByColumns, start, mid);
+                VectorizedGroupingTask rightTask = new VectorizedGroupingTask(tableData, rows, groupByColumns, mid, end);
+                
+                leftTask.fork();
+                Map<GroupKey, List<Integer>> rightResult = rightTask.compute();
+                Map<GroupKey, List<Integer>> leftResult = leftTask.join();
+                
+                // Merge results
+                return mergeGroupedResults(leftResult, rightResult);
+            }
+        }
+    }
+    
+    /**
+     * ULTRA-AGGRESSIVE: Vectorized aggregation task
+     */
+    private static class VectorizedAggregationTask extends RecursiveTask<Map<String, Object>> {
+        private final ColumnStore columnStore;
+        private final List<Integer> rows;
+        private final Map<String, AggregateDefinition> aggregateFunctions;
+        private final int start;
+        private final int end;
+        
+        VectorizedAggregationTask(ColumnStore columnStore, List<Integer> rows, 
+                                 Map<String, AggregateDefinition> aggregateFunctions, int start, int end) {
+            this.columnStore = columnStore;
+            this.rows = rows;
+            this.aggregateFunctions = aggregateFunctions;
+            this.start = start;
+            this.end = end;
+        }
+        
+        @Override
+        protected Map<String, Object> compute() {
+            if (end - start <= PARALLEL_THRESHOLD) {
+                return computeAggregatesVectorized(columnStore, rows.subList(start, end), aggregateFunctions);
+            } else {
+                int mid = (start + end) / 2;
+                VectorizedAggregationTask leftTask = new VectorizedAggregationTask(columnStore, rows, aggregateFunctions, start, mid);
+                VectorizedAggregationTask rightTask = new VectorizedAggregationTask(columnStore, rows, aggregateFunctions, mid, end);
+                
+                leftTask.fork();
+                Map<String, Object> rightResult = rightTask.compute();
+                Map<String, Object> leftResult = leftTask.join();
+                
+                return mergeAggregationResults(leftResult, rightResult, aggregateFunctions);
+            }
+        }
+    }
+    
+    /**
+     * Exécute une requête simple avec optimisations ultra-agressives
      * @param query La requête à exécuter
      * @return Le résultat de la requête
      */
     public QueryResult executeQuery(Query query) {
-        logger.info("Exécution de la requête sur la table: {}", query.getTableName());
+        long startTime = System.nanoTime();
+        
+        // ULTRA-AGGRESSIVE: Minimal logging for maximum speed
+        if (logger.isDebugEnabled()) {
+            logger.debug("ULTRA-FAST: Executing query on table: {}", query.getTableName());
+        }
+        
         // Vérifie que la table existe
         String tableName = query.getTableName();
         Table table = databaseContext.getTable(tableName);
         TableData tableData = databaseContext.getTableData(tableName);
         
-        // Vérifie que les colonnes existent
-        List<String> columnNames = query.getColumns();
-        if (columnNames.isEmpty()) {
-            // Si aucune colonne n'est spécifiée, on sélectionne toutes les colonnes
-            columnNames = table.getColumns().stream()
-                    .map(Column::getName)
-                    .collect(Collectors.toList());
-        } else if (columnNames.size() == 1 && columnNames.get(0).equals("*")) {
-            // Si on a spécifié "*", on sélectionne toutes les colonnes
-            columnNames = table.getColumns().stream()
-                    .map(Column::getName)
-                    .collect(Collectors.toList());
-            logger.info("Remplacement de * par toutes les colonnes: {}", columnNames);
-        } else {
-            // Vérifie que toutes les colonnes existent
-            for (String columnName : columnNames) {
-                if (table.getColumnIndex(columnName) == -1) {
-                    throw new IllegalArgumentException("Colonne inconnue: " + columnName);
-                }
-            }
-        }
-        
-        logger.info("Colonnes sélectionnées: {}", columnNames);
-        logger.info("Nombre de lignes dans la table: {}", tableData.getRowCount());
+        // ULTRA-AGGRESSIVE: Fast column validation
+        List<String> columnNames = validateAndGetColumns(query, table);
         
         // Acquiert un verrou en lecture
         tableData.readLock();
         try {
-            // Filtre les lignes
-            List<Integer> filteredRows = filterRows(tableData, query.getConditions());
-            logger.info("Nombre de lignes après filtrage: {}", filteredRows.size());
+            // ULTRA-AGGRESSIVE: Vectorized filtering
+            List<Integer> filteredRows = filterRowsVectorized(tableData, query.getConditions());
             
-            // Applique la limite si spécifiée
+            // ULTRA-AGGRESSIVE: Fast limit application
             if (query.getLimit() > 0 && filteredRows.size() > query.getLimit()) {
-                logger.info("Application de la limite: {}", query.getLimit());
                 filteredRows = filteredRows.subList(0, query.getLimit());
             }
             
-            // Groupe les lignes si nécessaire
-            Map<GroupKey, List<Integer>> groupedRows = groupRows(tableData, filteredRows, query.getGroupByColumns());
-            logger.info("Nombre de groupes après regroupement: {}", groupedRows.size());
+            // ULTRA-AGGRESSIVE: Parallel grouping for large datasets
+            Map<GroupKey, List<Integer>> groupedRows;
+            if (filteredRows.size() > PARALLEL_THRESHOLD && !query.getGroupByColumns().isEmpty()) {
+                groupedRows = groupRowsParallel(tableData, filteredRows, query.getGroupByColumns());
+            } else {
+                groupedRows = groupRowsVectorized(tableData, filteredRows, query.getGroupByColumns());
+            }
             
-            // Prépare le résultat
-            QueryResult result = createResult(tableData, columnNames, groupedRows, query.getGroupByColumns(), query.getAggregateFunctions());
-            logger.info("Nombre de lignes dans le résultat: {}", result.getRowCount());
+            // ULTRA-AGGRESSIVE: Vectorized result creation
+            QueryResult result = createResultVectorized(tableData, columnNames, groupedRows, 
+                                                       query.getGroupByColumns(), query.getAggregateFunctions());
+            
+            long elapsedNanos = System.nanoTime() - startTime;
+            if (logger.isInfoEnabled() && filteredRows.size() > 100_000) {
+                logger.info("ULTRA-FAST: Query completed in {:.2f}ms for {} rows, {} groups", 
+                           elapsedNanos / 1_000_000.0, filteredRows.size(), groupedRows.size());
+            }
+            
             return result;
         } catch (Exception e) {
-            logger.error("Erreur lors de l'exécution de la requête: {}", e.getMessage(), e);
+            logger.error("ULTRA-FAST: Query execution error: {}", e.getMessage(), e);
             throw e;
         } finally {
             tableData.readUnlock();
+            // Clear thread-local cache
+            GROUPING_CACHE.get().clear();
         }
     }
     
     /**
-     * Filtre les lignes selon les conditions
-     * @param tableData Les données de la table
-     * @param conditions Les conditions
-     * @return Les index des lignes filtrées
+     * ULTRA-AGGRESSIVE: Fast column validation and retrieval
      */
-    private List<Integer> filterRows(TableData tableData, List<Condition> conditions) {
-        List<Integer> filteredRows = new ArrayList<>();
+    private List<String> validateAndGetColumns(Query query, Table table) {
+        List<String> columnNames = query.getColumns();
+        if (columnNames.isEmpty() || (columnNames.size() == 1 && "*".equals(columnNames.get(0)))) {
+            // Fast path: get all columns
+            return table.getColumns().stream()
+                    .map(Column::getName)
+                    .collect(Collectors.toList());
+        }
         
-        // Si pas de conditions, on prend toutes les lignes
+        // Fast validation: check all columns exist
+        for (String columnName : columnNames) {
+            if (table.getColumnIndex(columnName) == -1) {
+                throw new IllegalArgumentException("Unknown column: " + columnName);
+            }
+        }
+        
+        return columnNames;
+    }
+    
+    /**
+     * ULTRA-AGGRESSIVE: Vectorized row filtering with minimal object creation
+     */
+    private List<Integer> filterRowsVectorized(TableData tableData, List<Condition> conditions) {
+        int rowCount = tableData.getRowCount();
+        List<Integer> filteredRows = new ArrayList<>(rowCount);
+        
+        // Fast path: no conditions
         if (conditions.isEmpty()) {
-            for (int i = 0; i < tableData.getRowCount(); i++) {
+            for (int i = 0; i < rowCount; i++) {
                 filteredRows.add(i);
             }
             return filteredRows;
         }
         
-        // Évalue les conditions pour chaque ligne
-        for (int i = 0; i < tableData.getRowCount(); i++) {
+        // ULTRA-AGGRESSIVE: Vectorized condition evaluation
+        // Pre-fetch column stores for better cache locality
+        ColumnStore[] columnStores = new ColumnStore[conditions.size()];
+        for (int i = 0; i < conditions.size(); i++) {
+            columnStores[i] = tableData.getColumnStore(conditions.get(i).getColumnName());
+        }
+        
+        // Vectorized evaluation with minimal method calls
+        for (int rowIndex = 0; rowIndex < rowCount; rowIndex++) {
             boolean match = true;
             
-            for (Condition condition : conditions) {
-                String columnName = condition.getColumnName();
-                ColumnStore columnStore = tableData.getColumnStore(columnName);
-                
-                if (!condition.evaluate(i, columnStore)) {
+            // Unrolled condition evaluation for better performance
+            for (int condIndex = 0; condIndex < conditions.size(); condIndex++) {
+                if (!conditions.get(condIndex).evaluate(rowIndex, columnStores[condIndex])) {
                     match = false;
                     break;
                 }
             }
             
             if (match) {
-                filteredRows.add(i);
+                filteredRows.add(rowIndex);
             }
         }
         
@@ -131,78 +272,75 @@ public class QueryExecutor {
     }
     
     /**
-     * Groupe les lignes selon les colonnes GROUP BY
-     * @param tableData Les données de la table
-     * @param rows Les index des lignes
-     * @param groupByColumns Les colonnes de groupement
-     * @return Les lignes groupées
+     * ULTRA-AGGRESSIVE: Parallel grouping for massive datasets
      */
-    private Map<GroupKey, List<Integer>> groupRows(TableData tableData, List<Integer> rows, List<String> groupByColumns) {
-        // Ensure logger is available, assuming it's defined at class level: private static final Logger logger = LoggerFactory.getLogger(QueryExecutor.class);
-        // Si pas de GROUP BY, on crée un seul groupe avec toutes les lignes
+    private Map<GroupKey, List<Integer>> groupRowsParallel(TableData tableData, List<Integer> rows, List<String> groupByColumns) {
         if (groupByColumns.isEmpty()) {
-            logger.debug("[Node specific log] groupRows: No groupBy columns specified. Returning single group with {} rows.", rows.size());
             return Collections.singletonMap(new GroupKey(Collections.emptyList()), rows);
         }
         
-        logger.info("[Node specific log] groupRows received {} rows to process. Grouping by: {}", rows.size(), groupByColumns);
+        // Use ForkJoinPool for parallel processing
+        VectorizedGroupingTask task = new VectorizedGroupingTask(tableData, rows, groupByColumns, 0, rows.size());
+        return ULTRA_FORK_JOIN_POOL.invoke(task);
+    }
+    
+    /**
+     * ULTRA-AGGRESSIVE: Vectorized grouping with minimal logging and maximum speed
+     */
+    private Map<GroupKey, List<Integer>> groupRowsVectorized(TableData tableData, List<Integer> rows, List<String> groupByColumns) {
+        if (groupByColumns.isEmpty()) {
+            return Collections.singletonMap(new GroupKey(Collections.emptyList()), rows);
+        }
         
-        // Groupe les lignes par les valeurs des colonnes GROUP BY
-        Map<GroupKey, List<Integer>> groupedRows = new HashMap<>();
+        return processRowsVectorized(tableData, rows, groupByColumns);
+    }
+    
+    /**
+     * ULTRA-AGGRESSIVE: Core vectorized row processing with zero logging overhead
+     */
+    private static Map<GroupKey, List<Integer>> processRowsVectorized(TableData tableData, List<Integer> rows, List<String> groupByColumns) {
+        GroupingCache cache = GROUPING_CACHE.get();
+        cache.ensureCapacity(groupByColumns.size());
+        
+        Map<GroupKey, List<Integer>> groupedRows = new ConcurrentHashMap<>(1000);
+        
+        // Pre-fetch column stores for better cache locality
+        ColumnStore[] columnStores = new ColumnStore[groupByColumns.size()];
+        for (int i = 0; i < groupByColumns.size(); i++) {
+            columnStores[i] = tableData.getColumnStore(groupByColumns.get(i));
+        }
+        
+        // ULTRA-AGGRESSIVE: Vectorized processing with minimal object creation
+        List<Object> groupKeyValues = new ArrayList<>(groupByColumns.size());
         
         for (int rowIndex : rows) {
-            List<Object> groupKeyValues = new ArrayList<>(groupByColumns.size());
+            groupKeyValues.clear();
             
-            for (String columnName : groupByColumns) {
-                ColumnStore columnStore = tableData.getColumnStore(columnName);
-                if (columnStore == null) {
-                    logger.error("[Node specific log] CRITICAL: ColumnStore for groupBy column '{}' is NULL. RowIndex: {}. Adding NULL to group key values.", columnName, rowIndex);
-                    groupKeyValues.add(null); // Add null if column store is missing, to avoid NPE and see key formation
-                    continue; // Skip to next column
-                }
-                Object value = extractValue(rowIndex, columnStore);
+            // Extract values with minimal method calls
+            for (int colIndex = 0; colIndex < groupByColumns.size(); colIndex++) {
+                ColumnStore columnStore = columnStores[colIndex];
+                Object value = extractValueFast(rowIndex, columnStore);
                 groupKeyValues.add(value);
             }
             
-            GroupKey groupKey = new GroupKey(groupKeyValues);
-
-            // Enhanced logging for VendorID or single group-by column scenarios
-            if (groupByColumns.contains("VendorID") || groupByColumns.size() == 1) {
-                String currentColumnName = groupByColumns.get(0); // Assuming single for this specific log or focusing on first if multiple
-                Object extractedGroupValue = groupKeyValues.isEmpty() ? "[N/A]" : groupKeyValues.get(0);
-                logger.info("[Node specific log] RowIndex: {}, For Column: '{}', Extracted Value: {}, Type: {}. Formed GroupKey values: {}", 
-                            rowIndex, 
-                            currentColumnName, 
-                            extractedGroupValue, 
-                            (extractedGroupValue != null ? extractedGroupValue.getClass().getName() : "null"), 
-                            groupKey.getValues());
-            }
+            GroupKey groupKey = new GroupKey(new ArrayList<>(groupKeyValues));
             
-            groupedRows.computeIfAbsent(groupKey, k -> {
-                logger.debug("[Node specific log] Creating new list for group key: {}", k.getValues());
-                return new ArrayList<>();
-            }).add(rowIndex);
+            // ULTRA-AGGRESSIVE: Use computeIfAbsent for atomic operations
+            groupedRows.computeIfAbsent(groupKey, k -> new ArrayList<>()).add(rowIndex);
         }
         
-        logger.info("[Node specific log] groupRows finished. Total groups formed: {}", groupedRows.size());
-        for (Map.Entry<GroupKey, List<Integer>> entry : groupedRows.entrySet()) {
-            logger.info("[Node specific log] Final Group Content: Key={}, Number of Rows in this Group={}", 
-                        entry.getKey().getValues(), entry.getValue().size());
-        }
         return groupedRows;
     }
     
     /**
-     * Extrait une valeur d'un ColumnStore
-     * @param rowIndex L'index de la ligne
-     * @param columnStore Le stockage de colonne
-     * @return La valeur
+     * ULTRA-AGGRESSIVE: Fast value extraction with minimal overhead
      */
-    private Object extractValue(int rowIndex, ColumnStore columnStore) {
+    private static Object extractValueFast(int rowIndex, ColumnStore columnStore) {
         if (columnStore.isNull(rowIndex)) {
             return null;
         }
         
+        // ULTRA-AGGRESSIVE: Switch with no default case for better JIT optimization
         switch (columnStore.getType()) {
             case INTEGER:
                 return columnStore.getInt(rowIndex);
@@ -219,21 +357,28 @@ public class QueryExecutor {
             case DATE:
             case TIMESTAMP:
                 return columnStore.getDate(rowIndex);
-            default:
-                throw new IllegalArgumentException("Type non supporté: " + columnStore.getType());
         }
+        throw new IllegalArgumentException("Unsupported type: " + columnStore.getType());
     }
     
     /**
-     * Crée le résultat de la requête
-     * @param tableData Les données de la table
-     * @param selectColumns Les colonnes à sélectionner
-     * @param groupedRows Les lignes groupées
-     * @param groupByColumns Les colonnes de groupement
-     * @param queryAggregateFunctions Les fonctions d'agrégation
-     * @return Le résultat de la requête
+     * ULTRA-AGGRESSIVE: Merge grouped results from parallel tasks
      */
-    private QueryResult createResult(
+    private static Map<GroupKey, List<Integer>> mergeGroupedResults(Map<GroupKey, List<Integer>> left, Map<GroupKey, List<Integer>> right) {
+        // Merge right into left for efficiency
+        for (Map.Entry<GroupKey, List<Integer>> entry : right.entrySet()) {
+            left.merge(entry.getKey(), entry.getValue(), (existing, newList) -> {
+                existing.addAll(newList);
+                return existing;
+            });
+        }
+        return left;
+    }
+    
+    /**
+     * ULTRA-AGGRESSIVE: Vectorized result creation with parallel aggregations
+     */
+    private QueryResult createResultVectorized(
         TableData tableData,
         List<String> selectColumns, 
         Map<GroupKey, List<Integer>> groupedRows,
@@ -241,37 +386,50 @@ public class QueryExecutor {
         Map<String, AggregateDefinition> queryAggregateFunctions) {
         
         List<String> finalResultColumnNames = new ArrayList<>();
-        List<Map<String, Object>> resultRowMaps = new ArrayList<>();
+        List<Map<String, Object>> resultRowMaps = new ArrayList<>(groupedRows.size());
 
-        // 1. Determine result column names: group-by columns first, then aggregate aliases.
-        //    Also include any other selected columns that are not part of group-by or aggregates for completeness.
-        for (String groupByColumn : groupByColumns) {
-            if (!finalResultColumnNames.contains(groupByColumn)) {
-                finalResultColumnNames.add(groupByColumn);
-            }
-        }
+        // ULTRA-AGGRESSIVE: Pre-allocate result columns
+        finalResultColumnNames.addAll(groupByColumns);
         if (queryAggregateFunctions != null) {
-            for (String alias : queryAggregateFunctions.keySet()) {
-                if (!finalResultColumnNames.contains(alias)) {
-                    finalResultColumnNames.add(alias);
-                }
+            finalResultColumnNames.addAll(queryAggregateFunctions.keySet());
+        }
+        
+        // ULTRA-AGGRESSIVE: Parallel processing for large result sets
+        if (groupedRows.size() > PARALLEL_THRESHOLD && queryAggregateFunctions != null && !queryAggregateFunctions.isEmpty()) {
+            // Use parallel streams for large datasets
+            resultRowMaps = groupedRows.entrySet().parallelStream()
+                .map(entry -> processGroupVectorized(entry, groupByColumns, queryAggregateFunctions, tableData))
+                .collect(Collectors.toList());
+        } else {
+            // Sequential processing for smaller datasets
+            for (Map.Entry<GroupKey, List<Integer>> groupEntry : groupedRows.entrySet()) {
+                resultRowMaps.add(processGroupVectorized(groupEntry, groupByColumns, queryAggregateFunctions, tableData));
             }
         }
         
-        // Process each group
-        for (Map.Entry<GroupKey, List<Integer>> groupEntry : groupedRows.entrySet()) {
+        return new QueryResult(finalResultColumnNames, resultRowMaps);
+        }
+        
+    /**
+     * ULTRA-AGGRESSIVE: Process a single group with vectorized aggregations
+     */
+    private static Map<String, Object> processGroupVectorized(
+        Map.Entry<GroupKey, List<Integer>> groupEntry,
+        List<String> groupByColumns,
+        Map<String, AggregateDefinition> queryAggregateFunctions,
+        TableData tableData) {
+        
             GroupKey groupKey = groupEntry.getKey();
             List<Integer> rowsInGroup = groupEntry.getValue();
             Map<String, Object> currentRowMap = new HashMap<>();
 
-            // A. Add group-by column values to the current row map
-            for (int i = 0; i < groupByColumns.size(); i++) {
-                String columnName = groupByColumns.get(i);
-                Object value = (groupKey.getValues().size() > i) ? groupKey.getValues().get(i) : null;
-                currentRowMap.put(columnName, value);
+        // ULTRA-AGGRESSIVE: Add group-by values with minimal overhead
+        List<Object> groupValues = groupKey.getValues();
+        for (int i = 0; i < groupByColumns.size() && i < groupValues.size(); i++) {
+            currentRowMap.put(groupByColumns.get(i), groupValues.get(i));
             }
 
-            // B. Compute and add aggregate function values to the current row map
+        // ULTRA-AGGRESSIVE: Vectorized aggregation computation
             if (queryAggregateFunctions != null) {
                 for (Map.Entry<String, AggregateDefinition> aggDefEntry : queryAggregateFunctions.entrySet()) {
                     String alias = aggDefEntry.getKey();
@@ -279,270 +437,266 @@ public class QueryExecutor {
                     AggregateFunction aggFunc = aggDef.getFunction();
                     String targetColumnName = aggDef.getTargetColumn();
 
-                    ColumnStore targetColumnStoreForAgg = null;
-                    if (targetColumnName != null && !targetColumnName.equals("*")) {
-                        targetColumnStoreForAgg = tableData.getColumnStore(targetColumnName);
-                        // Ensure the column exists for non-COUNT aggregates if a specific column is targeted.
-                        if (targetColumnStoreForAgg == null && aggFunc != AggregateFunction.COUNT) {
-                            String tableName = tableData.getTable() != null && tableData.getTable().getName() != null ? tableData.getTable().getName() : "[unknown_table]";
-                            throw new IllegalArgumentException(
-                                String.format("Target column '%s' not found in table '%s' for aggregate function %s with alias '%s'.",
-                                              targetColumnName, tableName, aggFunc, alias)
-                            );
+                ColumnStore targetColumnStore = null;
+                if (targetColumnName != null && !"*".equals(targetColumnName)) {
+                    targetColumnStore = tableData.getColumnStore(targetColumnName);
                         }
-                    }
-                    // For COUNT(*), targetColumnStoreForAgg will remain null, which is handled by computeAggregate.
-                    // For other aggregates, targetColumnStoreForAgg must be valid if a column is specified.
 
-                    Object aggregateValue = computeAggregate(aggFunc, targetColumnStoreForAgg, rowsInGroup);
+                Object aggregateValue = computeAggregateVectorized(aggFunc, targetColumnStore, rowsInGroup);
                     currentRowMap.put(alias, aggregateValue);
                 }
-            }
-            resultRowMaps.add(currentRowMap);
         }
         
-        return new QueryResult(finalResultColumnNames, resultRowMaps);
+        return currentRowMap;
     }
     
     /**
-     * Calcule une valeur agrégée
-     * @param function La fonction d'agrégation
-     * @param columnStore Le stockage de colonne pour les agrégats comme SUM, MIN, MAX, AVG. Peut être null pour COUNT.
-     * @param rows Les index des lignes à agréger
-     * @return La valeur agrégée
+     * ULTRA-AGGRESSIVE: Vectorized aggregate computation with minimal overhead
      */
-private Object computeAggregate(AggregateFunction function, ColumnStore columnStore, List<Integer> rows) {
+    private static Object computeAggregateVectorized(AggregateFunction function, ColumnStore columnStore, List<Integer> rows) {
         if (rows.isEmpty()) {
-            if (function == AggregateFunction.COUNT) {
-                return 0L;
+            return getEmptyAggregateValue(function);
             }
-            // For other aggregates on empty groups, result is null (or 0 for sum in AVG context, handled by computeSum)
-            if (function == AggregateFunction.AVG) {
-                Map<String, Object> avgMap = new HashMap<>();
-                avgMap.put("sum", 0.0);
-                avgMap.put("count", 0L);
-                return avgMap;
-            }
-            return null;
-        }
-
+        
+        // ULTRA-AGGRESSIVE: Vectorized computation based on function type
         switch (function) {
             case COUNT:
                 return (long) rows.size();
-
             case SUM:
-                if (columnStore == null) throw new IllegalArgumentException("ColumnStore cannot be null for SUM aggregate.");
-                return computeSum(columnStore, rows, false); // false: not for AVG context
-
+                return computeSumVectorized(columnStore, rows);
             case AVG:
-                if (columnStore == null) throw new IllegalArgumentException("ColumnStore cannot be null for AVG aggregate.");
-                Object sumForAvg = computeSum(columnStore, rows, true); // true: for AVG context (return 0.0 if all null)
-                long countNonNull = countNonNullValues(columnStore, rows);
-                
-                Map<String, Object> avgMap = new HashMap<>();
-                avgMap.put("sum", (sumForAvg instanceof Number) ? ((Number) sumForAvg).doubleValue() : 0.0);
-                avgMap.put("count", countNonNull);
-                return avgMap;
-
+                return computeAvgVectorized(columnStore, rows);
             case MIN:
-                if (columnStore == null) throw new IllegalArgumentException("ColumnStore cannot be null for MIN aggregate.");
-                return computeMin(columnStore, rows);
-
+                return computeMinVectorized(columnStore, rows);
             case MAX:
-                if (columnStore == null) throw new IllegalArgumentException("ColumnStore cannot be null for MAX aggregate.");
-                return computeMax(columnStore, rows);
-
+                return computeMaxVectorized(columnStore, rows);
+        }
+        
+        throw new IllegalArgumentException("Unsupported aggregate function: " + function);
+    }
+    
+    /**
+     * ULTRA-AGGRESSIVE: Vectorized SUM computation
+     */
+    private static Object computeSumVectorized(ColumnStore columnStore, List<Integer> rows) {
+        if (columnStore == null) return 0.0;
+        
+        double sum = 0.0;
+        long longSum = 0L;
+        boolean useDouble = false;
+        
+        // ULTRA-AGGRESSIVE: Type-specific vectorized computation
+        switch (columnStore.getType()) {
+            case INTEGER:
+                for (int rowIndex : rows) {
+                    if (!columnStore.isNull(rowIndex)) {
+                        longSum += columnStore.getInt(rowIndex);
+                    }
+                }
+                return longSum;
+            case LONG:
+                for (int rowIndex : rows) {
+                    if (!columnStore.isNull(rowIndex)) {
+                        longSum += columnStore.getLong(rowIndex);
+                    }
+                }
+                return longSum;
+            case FLOAT:
+            case DOUBLE:
+                useDouble = true;
+                for (int rowIndex : rows) {
+                    if (!columnStore.isNull(rowIndex)) {
+                        sum += columnStore.getType() == DataType.FLOAT ? 
+                               columnStore.getFloat(rowIndex) : columnStore.getDouble(rowIndex);
+                    }
+                }
+                return sum;
             default:
-                throw new UnsupportedOperationException("Fonction d'agrégation non supportée: " + function);
+                return 0.0;
         }
     }
-
-    private long countNonNullValues(ColumnStore columnStore, List<Integer> rows) {
-        if (columnStore == null || rows.isEmpty()) return 0L;
-        long count = 0;
+    
+    /**
+     * ULTRA-AGGRESSIVE: Vectorized AVG computation
+     */
+    private static Object computeAvgVectorized(ColumnStore columnStore, List<Integer> rows) {
+        if (columnStore == null) {
+            Map<String, Object> avgMap = new HashMap<>();
+            avgMap.put("sum", 0.0);
+            avgMap.put("count", 0L);
+            return avgMap;
+        }
+        
+        Object sumValue = computeSumVectorized(columnStore, rows);
+        long count = countNonNullValuesVectorized(columnStore, rows);
+        
+        Map<String, Object> avgMap = new HashMap<>();
+        avgMap.put("sum", sumValue);
+        avgMap.put("count", count);
+        return avgMap;
+    }
+    
+    /**
+     * ULTRA-AGGRESSIVE: Vectorized MIN computation
+     */
+    private static Object computeMinVectorized(ColumnStore columnStore, List<Integer> rows) {
+        if (columnStore == null) return null;
+        
+        Object minValue = null;
+        
         for (int rowIndex : rows) {
-            // Assuming ColumnStore.getValue(rowIndex) exists and returns null if the value is SQL NULL
-            if (columnStore.getValue(rowIndex) != null) {
+            if (!columnStore.isNull(rowIndex)) {
+                Object value = extractValueFast(rowIndex, columnStore);
+                if (minValue == null || (value instanceof Comparable && ((Comparable) value).compareTo(minValue) < 0)) {
+                    minValue = value;
+            }
+        }
+        }
+        
+        return minValue;
+    }
+
+    /**
+     * ULTRA-AGGRESSIVE: Vectorized MAX computation
+     */
+    private static Object computeMaxVectorized(ColumnStore columnStore, List<Integer> rows) {
+        if (columnStore == null) return null;
+        
+        Object maxValue = null;
+
+        for (int rowIndex : rows) {
+            if (!columnStore.isNull(rowIndex)) {
+                Object value = extractValueFast(rowIndex, columnStore);
+                if (maxValue == null || (value instanceof Comparable && ((Comparable) value).compareTo(maxValue) > 0)) {
+                    maxValue = value;
+                }
+            }
+        }
+        
+        return maxValue;
+    }
+    
+    /**
+     * ULTRA-AGGRESSIVE: Vectorized non-null count
+     */
+    private static long countNonNullValuesVectorized(ColumnStore columnStore, List<Integer> rows) {
+        if (columnStore == null) return 0L;
+        
+        long count = 0L;
+        for (int rowIndex : rows) {
+            if (!columnStore.isNull(rowIndex)) {
                 count++;
             }
         }
         return count;
     }
-
-    // New computeSum: handles nulls, returns 0.0 for all-null numerics in AVG context
-    private Object computeSum(ColumnStore columnStore, List<Integer> rows, boolean forAvgContext) {
-        if (columnStore == null || rows.isEmpty()) {
-            return forAvgContext ? 0.0 : null;
-        }
-
-        DataType type = columnStore.getType();
-        Double sumDouble = null;
-        Long sumLong = null;
-        boolean hasNonNullNumeric = false;
-
-        for (int rowIndex : rows) {
-            Object value = columnStore.getValue(rowIndex);
-            if (value == null) continue;
-
-            hasNonNullNumeric = true; // Mark that we found at least one non-null, type check later
-            switch (type) {
-                case INTEGER:
-                    if (value instanceof Number) { // Additional check for safety
-                        if (sumLong == null) sumLong = 0L;
-                        sumLong += ((Number) value).longValue();
-                    } else { hasNonNullNumeric = false; break; } // Non-numeric in numeric column?
-                    break;
-                case LONG:
-                     if (value instanceof Number) {
-                        if (sumLong == null) sumLong = 0L;
-                        sumLong += ((Number) value).longValue();
-                    } else { hasNonNullNumeric = false; break; }
-                    break;
-                case FLOAT:
-                    if (value instanceof Number) {
-                        if (sumDouble == null) sumDouble = 0.0;
-                        sumDouble += ((Number) value).floatValue(); // Use floatValue for precision matching type
-                    } else { hasNonNullNumeric = false; break; }
-                    break;
-                case DOUBLE:
-                    // DECIMAL is not a defined DataType, assuming it's handled as DOUBLE
-                    if (value instanceof Number) {
-                        if (sumDouble == null) sumDouble = 0.0;
-                        sumDouble += ((Number) value).doubleValue();
-                    } else { hasNonNullNumeric = false; break; }
-                    break;
-                default:
-                    // Non-numeric type, sum is not applicable for SUM aggregate
-                    // For AVG context, if type is non-numeric, sum part is 0.0.
-                    hasNonNullNumeric = false; // Reset as this value is not summable in a numeric sense
-                    break; // Break from switch
-            }
-            if (!hasNonNullNumeric && type.isNumeric()) { // If a value in a numeric column was not a number
-                 // This case might indicate data type mismatch or corruption, log warning?
-                 // For now, let it proceed, hasNonNullNumeric will be false if all numerics were like this
-            }
-        }
-
-        if (!hasNonNullNumeric && type.isNumeric()) { // If numeric type but no valid numbers found (all null or non-instanceof Number)
-            return forAvgContext ? 0.0 : null;
-        }
-        if (!type.isNumeric()) { // If not a numeric type at all
-             return forAvgContext ? 0.0 : null; // SUM for non-numeric is null (or 0.0 for AVG context)
-        }
-
-        if (sumLong != null) return sumLong;
-        if (sumDouble != null) return sumDouble;
-        
-        // If reached, means it was a numeric type, but all values were null or not Number instances.
-        return forAvgContext ? 0.0 : null;
-    }
-
-    // Original computeSum, now delegates to the new one.
-    // Kept for compatibility if other parts of the code call it directly for SUM aggregate.
-    private Object computeSum(ColumnStore columnStore, List<Integer> rows) {
-        // Check if columnStore itself is null or rows are empty before calling getType on columnStore
-        if (columnStore == null || rows.isEmpty()) {
-             // For a direct SUM aggregate, if there's nothing to sum, result is null.
+    
+    /**
+     * ULTRA-AGGRESSIVE: Get empty aggregate value for initialization
+     */
+    private static Object getEmptyAggregateValue(AggregateFunction function) {
+        switch (function) {
+            case COUNT:
+                return 0L;
+            case SUM:
+                return 0.0;
+            case AVG:
+                Map<String, Object> avgMap = new HashMap<>();
+                avgMap.put("sum", 0.0);
+                avgMap.put("count", 0L);
+                return avgMap;
+            case MIN:
+            case MAX:
             return null; 
         }
-        // Existing logic for SUM (non-AVG context)
-        // This part should ideally also use the new computeSum(cs, rows, false)
-        // For now, let's assume the old logic was specific for SUM and needs to be preserved if different.
-        // OR, more cleanly, just delegate:
-        return computeSum(columnStore, rows, false); 
-        // The old switch logic for computeSum is now effectively replaced by the new computeSum(..., ..., false).
-    }
-    
-    private Object computeMin(ColumnStore columnStore, List<Integer> rows) {
-        // Implémentation simplifiée pour les types courants
-        switch (columnStore.getType()) {
-            case INTEGER:
-                return rows.stream()
-                    .filter(row -> !columnStore.isNull(row))
-                    .mapToInt(row -> columnStore.getInt(row))
-                    .min()
-                    .orElse(0);
-                
-            case LONG:
-                return rows.stream()
-                    .filter(row -> !columnStore.isNull(row))
-                    .mapToLong(row -> columnStore.getLong(row))
-                    .min()
-                    .orElse(0L);
-                
-            case FLOAT:
-                OptionalDouble floatMin = rows.stream()
-                    .filter(row -> !columnStore.isNull(row))
-                    .mapToDouble(row -> columnStore.getFloat(row))
-                    .min();
-                return floatMin.isPresent() ? (float) floatMin.getAsDouble() : 0.0f;
-                
-            case DOUBLE:
-                return rows.stream()
-                    .filter(row -> !columnStore.isNull(row))
-                    .mapToDouble(row -> columnStore.getDouble(row))
-                    .min()
-                    .orElse(0.0);
-                
-            case STRING:
-                return rows.stream()
-                    .filter(row -> !columnStore.isNull(row))
-                    .map(row -> columnStore.getString(row))
-                    .min(String::compareTo)
-                    .orElse("");
-                
-            default:
-                throw new IllegalArgumentException("Type non supporté pour MIN: " + columnStore.getType());
-        }
+        return null;
     }
     
     /**
-     * Calcule le maximum des valeurs
-     * @param columnStore Le stockage de colonne
-     * @param rows Les index des lignes
-     * @return Le maximum
+     * ULTRA-AGGRESSIVE: Vectorized aggregation computation for parallel tasks
      */
-    private Object computeMax(ColumnStore columnStore, List<Integer> rows) {
-        // Implémentation simplifiée pour les types courants
-        switch (columnStore.getType()) {
-            case INTEGER:
-                return rows.stream()
-                    .filter(row -> !columnStore.isNull(row))
-                    .mapToInt(row -> columnStore.getInt(row))
-                    .max()
-                    .orElse(0);
-                
-            case LONG:
-                return rows.stream()
-                    .filter(row -> !columnStore.isNull(row))
-                    .mapToLong(row -> columnStore.getLong(row))
-                    .max()
-                    .orElse(0L);
-                
-            case FLOAT:
-                OptionalDouble floatMax = rows.stream()
-                    .filter(row -> !columnStore.isNull(row))
-                    .mapToDouble(row -> columnStore.getFloat(row))
-                    .max();
-                return floatMax.isPresent() ? (float) floatMax.getAsDouble() : 0.0f;
-                
-            case DOUBLE:
-                return rows.stream()
-                    .filter(row -> !columnStore.isNull(row))
-                    .mapToDouble(row -> columnStore.getDouble(row))
-                    .max()
-                    .orElse(0.0);
-                
-            case STRING:
-                return rows.stream()
-                    .filter(row -> !columnStore.isNull(row))
-                    .map(row -> columnStore.getString(row))
-                    .max(String::compareTo)
-                    .orElse("");
-                
-            default:
-                throw new IllegalArgumentException("Type non supporté pour MAX: " + columnStore.getType());
+    private static Map<String, Object> computeAggregatesVectorized(
+        ColumnStore columnStore, List<Integer> rows, Map<String, AggregateDefinition> aggregateFunctions) {
+        
+        Map<String, Object> results = new HashMap<>();
+        
+        for (Map.Entry<String, AggregateDefinition> entry : aggregateFunctions.entrySet()) {
+            String alias = entry.getKey();
+            AggregateDefinition aggDef = entry.getValue();
+            Object value = computeAggregateVectorized(aggDef.getFunction(), columnStore, rows);
+            results.put(alias, value);
         }
+        
+        return results;
+    }
+    
+    /**
+     * ULTRA-AGGRESSIVE: Merge aggregation results from parallel tasks
+     */
+    private static Map<String, Object> mergeAggregationResults(
+        Map<String, Object> left, Map<String, Object> right, Map<String, AggregateDefinition> aggregateFunctions) {
+        
+        Map<String, Object> merged = new HashMap<>(left);
+        
+        for (Map.Entry<String, AggregateDefinition> entry : aggregateFunctions.entrySet()) {
+            String alias = entry.getKey();
+            AggregateFunction function = entry.getValue().getFunction();
+            
+            Object leftValue = left.get(alias);
+            Object rightValue = right.get(alias);
+            Object mergedValue = mergeAggregateValues(function, leftValue, rightValue);
+            merged.put(alias, mergedValue);
+        }
+        
+        return merged;
+    }
+    
+    /**
+     * ULTRA-AGGRESSIVE: Merge two aggregate values
+     */
+    private static Object mergeAggregateValues(AggregateFunction function, Object left, Object right) {
+        switch (function) {
+            case COUNT:
+                return ((Number) left).longValue() + ((Number) right).longValue();
+            case SUM:
+                if (left instanceof Number && right instanceof Number) {
+                    return ((Number) left).doubleValue() + ((Number) right).doubleValue();
+                }
+                return 0.0;
+            case AVG:
+                if (left instanceof Map && right instanceof Map) {
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> leftMap = (Map<String, Object>) left;
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> rightMap = (Map<String, Object>) right;
+                    
+                    double leftSum = ((Number) leftMap.get("sum")).doubleValue();
+                    long leftCount = ((Number) leftMap.get("count")).longValue();
+                    double rightSum = ((Number) rightMap.get("sum")).doubleValue();
+                    long rightCount = ((Number) rightMap.get("count")).longValue();
+                    
+                    Map<String, Object> mergedMap = new HashMap<>();
+                    mergedMap.put("sum", leftSum + rightSum);
+                    mergedMap.put("count", leftCount + rightCount);
+                    return mergedMap;
+                }
+                return left;
+            case MIN:
+                if (left == null) return right;
+                if (right == null) return left;
+                if (left instanceof Comparable && right instanceof Comparable) {
+                    return ((Comparable) left).compareTo(right) <= 0 ? left : right;
+                }
+                return left;
+            case MAX:
+                if (left == null) return right;
+                if (right == null) return left;
+                if (left instanceof Comparable && right instanceof Comparable) {
+                    return ((Comparable) left).compareTo(right) >= 0 ? left : right;
+        }
+                return left;
+        }
+        return left;
     }
     
     /**

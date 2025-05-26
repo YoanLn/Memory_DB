@@ -137,6 +137,41 @@
         <artifactId>mysql-connector-java</artifactId>
         <version>8.0.17</version>
       </dependency>
+
+        <!-- Ultra-fast off-heap storage -->
+        <dependency>
+            <groupId>net.openhft</groupId>
+            <artifactId>chronicle-map</artifactId>
+            <version>3.24ea0</version>
+        </dependency>
+        
+        <!-- Direct memory allocation -->
+        <dependency>
+            <groupId>org.agrona</groupId>
+            <artifactId>agrona</artifactId>
+            <version>1.19.1</version>
+        </dependency>
+        
+        <!-- Ultra-fast serialization -->
+        <dependency>
+            <groupId>com.esotericsoftware</groupId>
+            <artifactId>kryo</artifactId>
+            <version>5.4.0</version>
+        </dependency>
+        
+        <!-- Memory-mapped files -->
+        <dependency>
+            <groupId>org.mapdb</groupId>
+            <artifactId>mapdb</artifactId>
+            <version>3.0.9</version>
+        </dependency>
+        
+        <!-- LMAX Disruptor for ultra-fast queuing -->
+        <dependency>
+            <groupId>com.lmax</groupId>
+            <artifactId>disruptor</artifactId>
+            <version>3.4.4</version>
+        </dependency>
     </dependencies>
 
     <build>

@@ -23,6 +23,8 @@
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/distribution/ClusterManager.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/query/OrderByColumn.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/rest/dto/OrderByDto.java
+/Users/yoanln/MemoryDB/src/main/java/com/memorydb/storage/UltraFastColumnStore.java
+/Users/yoanln/MemoryDB/src/main/java/com/memorydb/processing/UltraFastEventProcessor.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/parquet/ParquetLoadStats.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/query/AggregateFunction.java
 /Users/yoanln/MemoryDB/src/main/java/com/memorydb/parquet/ParquetSchemaReader.java

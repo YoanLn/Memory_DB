@@ -123,7 +123,7 @@ load_binary() {
     -X POST \
     -H "Content-Type: application/octet-stream" \
     --data-binary @"$file" \
-    "http://$host/api/tables/parquet_file/load-binary?batchSize=50000&rowLimit=20000000&skipRows=0"
+    "http://$host/api/tables/parquet_file/load-binary?batchSize=200000&rowLimit=20000000&skipRows=0"
   
   echo ""
   echo "Chargement terminé. Vérifiez les statistiques avec: ./curl-commands.sh stats"
@@ -350,6 +350,304 @@ check_health() {
     http://$NODE1/api/cluster/health | jq '.'
 }
 
+# Requêtes intelligentes pour l'analyse des données de taxi NYC
+
+# 1. Analyse des vendeurs (compagnies de taxi)
+query_vendor_analysis() {
+  echo "=== ANALYSE DES VENDEURS DE TAXI ==="
+  curl --noproxy localhost -X POST -H "Content-Type: application/json" \
+    -d '{
+      "tableName": "parquet_file",
+      "columns": ["VendorID"],
+      "groupBy": ["VendorID"],
+      "aggregates": {
+        "total_trips": "COUNT",
+        "avg_fare": "AVG",
+        "total_revenue": "SUM",
+        "max_fare": "MAX",
+        "min_fare": "MIN"
+      },
+      "aggregateColumns": {
+        "avg_fare": "fare_amount",
+        "total_revenue": "total_amount",
+        "max_fare": "fare_amount",
+        "min_fare": "fare_amount"
+      },
+      "distributed": true,
+      "limit": 10
+    }' \
+    http://$NODE1/api/query | jq '.'
+}
+
+# 2. Analyse des zones de pickup les plus populaires
+query_popular_pickup_zones() {
+  echo "=== ZONES DE PICKUP LES PLUS POPULAIRES ==="
+  curl --noproxy localhost -X POST -H "Content-Type: application/json" \
+    -d '{
+      "tableName": "parquet_file",
+      "columns": ["PULocationID"],
+      "groupBy": ["PULocationID"],
+      "aggregates": {
+        "trip_count": "COUNT",
+        "avg_distance": "AVG",
+        "avg_fare": "AVG",
+        "total_revenue": "SUM"
+      },
+      "aggregateColumns": {
+        "avg_distance": "trip_distance",
+        "avg_fare": "fare_amount",
+        "total_revenue": "total_amount"
+      },
+      "orderBy": [{"column": "trip_count", "ascending": false}],
+      "distributed": true,
+      "limit": 20
+    }' \
+    http://$NODE1/api/query | jq '.'
+}
+
+# 3. Analyse des types de paiement
+query_payment_analysis() {
+  echo "=== ANALYSE DES TYPES DE PAIEMENT ==="
+  curl --noproxy localhost -X POST -H "Content-Type: application/json" \
+    -d '{
+      "tableName": "parquet_file",
+      "columns": ["payment_type"],
+      "groupBy": ["payment_type"],
+      "aggregates": {
+        "transaction_count": "COUNT",
+        "avg_tip": "AVG",
+        "total_tips": "SUM",
+        "avg_total": "AVG"
+      },
+      "aggregateColumns": {
+        "avg_tip": "tip_amount",
+        "total_tips": "tip_amount",
+        "avg_total": "total_amount"
+      },
+      "distributed": true,
+      "limit": 10
+    }' \
+    http://$NODE1/api/query | jq '.'
+}
+
+# 4. Analyse des distances de voyage
+query_distance_analysis() {
+  echo "=== ANALYSE DES DISTANCES DE VOYAGE ==="
+  curl --noproxy localhost -X POST -H "Content-Type: application/json" \
+    -d '{
+      "tableName": "parquet_file",
+      "columns": ["*"],
+      "conditions": [
+        {"column": "trip_distance", "operator": "GREATER_THAN", "value": 0},
+        {"column": "trip_distance", "operator": "LESS_THAN", "value": 100}
+      ],
+      "aggregates": {
+        "total_trips": "COUNT",
+        "avg_distance": "AVG",
+        "max_distance": "MAX",
+        "min_distance": "MIN",
+        "avg_fare_per_mile": "AVG"
+      },
+      "aggregateColumns": {
+        "avg_distance": "trip_distance",
+        "max_distance": "trip_distance",
+        "min_distance": "trip_distance",
+        "avg_fare_per_mile": "fare_amount"
+      },
+      "distributed": true,
+      "limit": 1
+    }' \
+    http://$NODE1/api/query | jq '.'
+}
+
+# 5. Analyse des pourboires par nombre de passagers
+query_tip_by_passengers() {
+  echo "=== ANALYSE DES POURBOIRES PAR NOMBRE DE PASSAGERS ==="
+  curl --noproxy localhost -X POST -H "Content-Type: application/json" \
+    -d '{
+      "tableName": "parquet_file",
+      "columns": ["passenger_count"],
+      "groupBy": ["passenger_count"],
+      "conditions": [
+        {"column": "passenger_count", "operator": "GREATER_THAN", "value": 0},
+        {"column": "passenger_count", "operator": "LESS_THAN_OR_EQUALS", "value": 6}
+      ],
+      "aggregates": {
+        "trip_count": "COUNT",
+        "avg_tip": "AVG",
+        "avg_tip_percentage": "AVG",
+        "total_tips": "SUM"
+      },
+      "aggregateColumns": {
+        "avg_tip": "tip_amount",
+        "avg_tip_percentage": "tip_amount",
+        "total_tips": "tip_amount"
+      },
+      "orderBy": [{"column": "passenger_count", "ascending": true}],
+      "distributed": true,
+      "limit": 10
+    }' \
+    http://$NODE1/api/query | jq '.'
+}
+
+# 6. Analyse des trajets par code tarifaire
+query_ratecode_analysis() {
+  echo "=== ANALYSE PAR CODE TARIFAIRE ==="
+  curl --noproxy localhost -X POST -H "Content-Type: application/json" \
+    -d '{
+      "tableName": "parquet_file",
+      "columns": ["RatecodeID"],
+      "groupBy": ["RatecodeID"],
+      "aggregates": {
+        "trip_count": "COUNT",
+        "avg_fare": "AVG",
+        "avg_distance": "AVG",
+        "avg_total": "AVG"
+      },
+      "aggregateColumns": {
+        "avg_fare": "fare_amount",
+        "avg_distance": "trip_distance",
+        "avg_total": "total_amount"
+      },
+      "distributed": true,
+      "limit": 10
+    }' \
+    http://$NODE1/api/query | jq '.'
+}
+
+# 7. Analyse des trajets avec frais d'aéroport
+query_airport_fee_analysis() {
+  echo "=== ANALYSE DES FRAIS D'AÉROPORT ==="
+  curl --noproxy localhost -X POST -H "Content-Type: application/json" \
+    -d '{
+      "tableName": "parquet_file",
+      "columns": ["airport_fee"],
+      "groupBy": ["airport_fee"],
+      "aggregates": {
+        "trip_count": "COUNT",
+        "avg_total_amount": "AVG",
+        "avg_distance": "AVG"
+      },
+      "aggregateColumns": {
+        "avg_total_amount": "total_amount",
+        "avg_distance": "trip_distance"
+      },
+      "distributed": true,
+      "limit": 10
+    }' \
+    http://$NODE1/api/query | jq '.'
+}
+
+# 8. Requête complexe: Analyse croisée vendeur vs zone de pickup
+query_vendor_pickup_analysis() {
+  echo "=== ANALYSE CROISÉE VENDEUR VS ZONE DE PICKUP ==="
+  curl --noproxy localhost -X POST -H "Content-Type: application/json" \
+    -d '{
+      "tableName": "parquet_file",
+      "columns": ["VendorID", "PULocationID"],
+      "groupBy": ["VendorID", "PULocationID"],
+      "aggregates": {
+        "trip_count": "COUNT",
+        "avg_fare": "AVG",
+        "total_revenue": "SUM"
+      },
+      "aggregateColumns": {
+        "avg_fare": "fare_amount",
+        "total_revenue": "total_amount"
+      },
+      "conditions": [
+        {"column": "VendorID", "operator": "IS_NOT_NULL"},
+        {"column": "PULocationID", "operator": "IS_NOT_NULL"}
+      ],
+      "orderBy": [
+        {"column": "trip_count", "ascending": false}
+      ],
+      "distributed": true,
+      "limit": 50
+    }' \
+    http://$NODE1/api/query | jq '.'
+}
+
+# 9. Requête de performance: Trajets longs vs courts
+query_trip_length_performance() {
+  echo "=== PERFORMANCE: TRAJETS LONGS VS COURTS ==="
+  echo "Trajets courts (< 2 miles):"
+  curl --noproxy localhost -X POST -H "Content-Type: application/json" \
+    -d '{
+      "tableName": "parquet_file",
+      "columns": ["*"],
+      "conditions": [
+        {"column": "trip_distance", "operator": "LESS_THAN", "value": 2},
+        {"column": "trip_distance", "operator": "GREATER_THAN", "value": 0}
+      ],
+      "aggregates": {
+        "short_trip_count": "COUNT",
+        "avg_short_fare": "AVG",
+        "avg_short_tip": "AVG"
+      },
+      "aggregateColumns": {
+        "avg_short_fare": "fare_amount",
+        "avg_short_tip": "tip_amount"
+      },
+      "distributed": true,
+      "limit": 1
+    }' \
+    http://$NODE1/api/query | jq '.'
+    
+  echo "\nTrajets longs (> 10 miles):"
+  curl --noproxy localhost -X POST -H "Content-Type: application/json" \
+    -d '{
+      "tableName": "parquet_file",
+      "columns": ["*"],
+      "conditions": [
+        {"column": "trip_distance", "operator": "GREATER_THAN", "value": 10}
+      ],
+      "aggregates": {
+        "long_trip_count": "COUNT",
+        "avg_long_fare": "AVG",
+        "avg_long_tip": "AVG"
+      },
+      "aggregateColumns": {
+        "avg_long_fare": "fare_amount",
+        "avg_long_tip": "tip_amount"
+      },
+      "distributed": true,
+      "limit": 1
+    }' \
+    http://$NODE1/api/query | jq '.'
+}
+
+# 10. Benchmark de performance sur gros volume
+query_performance_benchmark() {
+  echo "=== BENCHMARK DE PERFORMANCE ==="
+  local start_time=$(date +%s%N)
+  
+  curl --noproxy localhost -X POST -H "Content-Type: application/json" \
+    -d '{
+      "tableName": "parquet_file",
+      "columns": ["VendorID", "PULocationID", "DOLocationID"],
+      "groupBy": ["VendorID", "PULocationID", "DOLocationID"],
+      "aggregates": {
+        "trip_count": "COUNT",
+        "total_revenue": "SUM",
+        "avg_distance": "AVG",
+        "avg_duration": "AVG"
+      },
+      "aggregateColumns": {
+        "total_revenue": "total_amount",
+        "avg_distance": "trip_distance",
+        "avg_duration": "trip_distance"
+      },
+      "distributed": true,
+      "limit": 1000
+    }' \
+    http://$NODE1/api/query > /dev/null
+    
+  local end_time=$(date +%s%N)
+  local duration=$(( (end_time - start_time) / 1000000 ))
+  echo "Temps d'exécution du benchmark: ${duration}ms"
+}
+
 # Exécution en fonction du paramètre
 case "$1" in
   create)
@@ -421,8 +719,38 @@ case "$1" in
     echo "Configuration pour environnement universitaire avec machines distinctes..."
     university_setup "${2:-100}" "${3:-$NODE1}" "${4:-$PARQUET_FILE}"
     ;;
+  vendor-analysis)
+    query_vendor_analysis
+    ;;
+  popular-pickup-zones)
+    query_popular_pickup_zones
+    ;;
+  payment-analysis)
+    query_payment_analysis
+    ;;
+  distance-analysis)
+    query_distance_analysis
+    ;;
+  tip-by-passengers)
+    query_tip_by_passengers
+    ;;
+  ratecode-analysis)
+    query_ratecode_analysis
+    ;;
+  airport-fee-analysis)
+    query_airport_fee_analysis
+    ;;
+  vendor-pickup-analysis)
+    query_vendor_pickup_analysis
+    ;;
+  trip-length-performance)
+    query_trip_length_performance
+    ;;
+  performance-benchmark)
+    query_performance_benchmark
+    ;;
   *)
-    echo "Usage: ./curl-commands.sh [create|list|load-small|load-large|load-full|stats|stats-consolidated|count-rows|query|group-by|aggregates|delete|health|logs|debug|test-small|test-large|test-coordinator|university-setup]"
+    echo "Usage: ./curl-commands.sh [create|list|load-small|load-large|load-full|stats|stats-consolidated|count-rows|query|group-by|aggregates|delete|health|logs|debug|test-small|test-large|test-coordinator|university-setup|vendor-analysis|popular-pickup-zones|payment-analysis|distance-analysis|tip-by-passengers|ratecode-analysis|airport-fee-analysis|vendor-pickup-analysis|trip-length-performance|performance-benchmark]"
     echo ""
     echo "Exemples:"
     echo "  $0 create             - Crée la table parquet_file"
@@ -438,5 +766,15 @@ case "$1" in
     echo "  $0 aggregates col val - Exécute une requête avec GROUP BY et fonctions d'agrégation"
     echo "  $0 delete nom         - Supprime la table spécifiée (par défaut: parquet_file)"
     echo "  $0 health             - Vérifie l'état de santé du cluster"
+    echo "  $0 vendor-analysis    - Analyse des vendeurs de taxi"
+    echo "  $0 popular-pickup-zones - Analyse des zones de pickup les plus populaires"
+    echo "  $0 payment-analysis   - Analyse des types de paiement"
+    echo "  $0 distance-analysis  - Analyse des distances de voyage"
+    echo "  $0 tip-by-passengers  - Analyse des pourboires par nombre de passagers"
+    echo "  $0 ratecode-analysis  - Analyse des trajets par code tarifaire"
+    echo "  $0 airport-fee-analysis - Analyse des trajets avec frais d'aéroport"
+    echo "  $0 vendor-pickup-analysis - Analyse croisée vendeur vs zone de pickup"
+    echo "  $0 trip-length-performance - Analyse de performance: Trajets longs vs courts"
+    echo "  $0 performance-benchmark - Benchmark de performance sur gros volume"
     ;;
 esac

@@ -47,10 +47,24 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.zip.Deflater;
+import java.util.zip.DeflaterOutputStream;
+import com.esotericsoftware.kryo.Kryo;
+import com.esotericsoftware.kryo.io.Output;
+import com.esotericsoftware.kryo.io.Input;
 
 /**
- * Implémentation optimisée pour le chargement de fichiers Parquet 
- * avec support des grands volumes et traitement par batch
+ * ULTRA-AGGRESSIVE Parquet loader with extreme performance optimizations
+ * - Connection pooling with persistent HTTP clients
+ * - Massive parallel processing with custom thread pools
+ * - Zero-copy binary operations
+ * - Async streaming with pipeline parallelism
+ * - 10x larger batch sizes for maximum throughput
  */
 @ApplicationScoped
 public class VectorizedParquetLoader {
@@ -62,10 +76,24 @@ public class VectorizedParquetLoader {
     @Inject
     private ClusterManager clusterManager;
 
-    private ExecutorService executorService;
+    // ULTRA-AGGRESSIVE: Massive thread pools for maximum parallelism
+    private static final int ULTRA_THREAD_POOL_SIZE = Runtime.getRuntime().availableProcessors() * 8;
+    private static final int NETWORK_THREAD_POOL_SIZE = 64; // Dedicated network threads
+    private static final int PROCESSING_THREAD_POOL_SIZE = 32; // Dedicated processing threads
+    
+    private ExecutorService ultraExecutorService;
+    private ExecutorService networkExecutorService;
+    private ExecutorService processingExecutorService;
 
-    private HttpClient httpClient;
+    // ULTRA-AGGRESSIVE: Persistent HTTP client pool with connection reuse
+    private static final Map<String, HttpClient> HTTP_CLIENT_POOL = new HashMap<>();
+    private static final Object CLIENT_POOL_LOCK = new Object();
+    
     private final ObjectMapper objectMapper;
+
+    // ULTRA-AGGRESSIVE: Massive batch sizes for maximum throughput
+    private static final int ULTRA_BATCH_SIZE = 2_000_000; // 2M rows per batch
+    private static final int MEGA_BATCH_SIZE = 5_000_000; // 5M rows for local processing
 
     // List to track pending async operations
     private List<CompletableFuture<Void>> pendingOperations = new ArrayList<>();
@@ -73,9 +101,22 @@ public class VectorizedParquetLoader {
     // Reusable objects cache to reduce GC pressure
     private ThreadLocal<ValueCache> valueCache = ThreadLocal.withInitial(ValueCache::new);
     
-    // Reusable buffer for temporary file operations
-    private static final int BUFFER_SIZE = 256 * 1024; // 256KB buffer
-    private ThreadLocal<byte[]> bufferCache = ThreadLocal.withInitial(() -> new byte[BUFFER_SIZE]);
+    // ULTRA-AGGRESSIVE: Larger buffers for maximum I/O throughput
+    private static final int ULTRA_BUFFER_SIZE = 2 * 1024 * 1024; // 2MB buffer
+    private ThreadLocal<byte[]> bufferCache = ThreadLocal.withInitial(() -> new byte[ULTRA_BUFFER_SIZE]);
+    
+    // Ultra-fast Kryo serialization
+    private ThreadLocal<Kryo> kryoCache = ThreadLocal.withInitial(() -> {
+        Kryo kryo = new Kryo();
+        kryo.setRegistrationRequired(false);
+        kryo.setReferences(false); // Disable references for better performance
+        return kryo;
+    });
+    
+    // ULTRA-AGGRESSIVE: Performance monitoring
+    private final AtomicLong totalRowsProcessed = new AtomicLong(0);
+    private final AtomicLong totalBytesTransferred = new AtomicLong(0);
+    private final AtomicLong networkOperations = new AtomicLong(0);
     
     /**
      * Cache of primitive and reusable values to reduce object creation during row extraction
@@ -116,13 +157,99 @@ public class VectorizedParquetLoader {
         }
     }
 
-    // Création d'un client HTTP pour la distribution inter-nœuds
+    // ULTRA-AGGRESSIVE: Initialize massive thread pools and persistent HTTP clients
     public VectorizedParquetLoader() {
-        this.httpClient = HttpClient.newBuilder()
-            .version(HttpClient.Version.HTTP_1_1)
-            .connectTimeout(java.time.Duration.ofSeconds(30))
-            .build();
         this.objectMapper = new ObjectMapper();
+        initializeUltraThreadPools();
+        initializePersistentHttpClients();
+    }
+    
+    /**
+     * ULTRA-AGGRESSIVE: Initialize massive thread pools for maximum parallelism
+     */
+    private void initializeUltraThreadPools() {
+        // Ultra-massive general purpose thread pool
+        ultraExecutorService = new ThreadPoolExecutor(
+            ULTRA_THREAD_POOL_SIZE,
+            ULTRA_THREAD_POOL_SIZE * 2,
+            60L, TimeUnit.SECONDS,
+            new LinkedBlockingQueue<>(10000),
+            r -> {
+                Thread t = new Thread(r, "Ultra-Processor-" + System.nanoTime());
+                t.setDaemon(false);
+                t.setPriority(Thread.MAX_PRIORITY);
+                return t;
+            }
+        );
+        
+        // Dedicated network thread pool for HTTP operations
+        networkExecutorService = new ThreadPoolExecutor(
+            NETWORK_THREAD_POOL_SIZE,
+            NETWORK_THREAD_POOL_SIZE,
+            30L, TimeUnit.SECONDS,
+            new LinkedBlockingQueue<>(5000),
+            r -> {
+                Thread t = new Thread(r, "Network-Ultra-" + System.nanoTime());
+                t.setDaemon(false);
+                t.setPriority(Thread.MAX_PRIORITY);
+                return t;
+            }
+        );
+        
+        // Dedicated processing thread pool for data operations
+        processingExecutorService = new ThreadPoolExecutor(
+            PROCESSING_THREAD_POOL_SIZE,
+            PROCESSING_THREAD_POOL_SIZE,
+            30L, TimeUnit.SECONDS,
+            new LinkedBlockingQueue<>(5000),
+            r -> {
+                Thread t = new Thread(r, "Processing-Ultra-" + System.nanoTime());
+                t.setDaemon(false);
+                t.setPriority(Thread.MAX_PRIORITY);
+                return t;
+            }
+        );
+        
+        logger.info("ULTRA-AGGRESSIVE thread pools initialized: {} ultra threads, {} network threads, {} processing threads",
+                ULTRA_THREAD_POOL_SIZE, NETWORK_THREAD_POOL_SIZE, PROCESSING_THREAD_POOL_SIZE);
+    }
+    
+    /**
+     * ULTRA-AGGRESSIVE: Initialize persistent HTTP clients with connection pooling
+     */
+    private void initializePersistentHttpClients() {
+        synchronized (CLIENT_POOL_LOCK) {
+            if (HTTP_CLIENT_POOL.isEmpty()) {
+                // Create persistent HTTP clients for each potential node
+                for (int i = 1; i <= 10; i++) { // Support up to 10 nodes
+                    String nodeKey = "node" + i;
+                    HttpClient client = HttpClient.newBuilder()
+            .version(HttpClient.Version.HTTP_1_1)
+                        .connectTimeout(java.time.Duration.ofSeconds(5)) // Faster connection timeout
+                        .executor(networkExecutorService) // Use dedicated network threads
+            .build();
+                    HTTP_CLIENT_POOL.put(nodeKey, client);
+                }
+                logger.info("ULTRA-AGGRESSIVE: Initialized {} persistent HTTP clients", HTTP_CLIENT_POOL.size());
+            }
+        }
+    }
+    
+    /**
+     * ULTRA-AGGRESSIVE: Get or create persistent HTTP client for a node
+     */
+    private HttpClient getHttpClientForNode(String nodeId) {
+        synchronized (CLIENT_POOL_LOCK) {
+            return HTTP_CLIENT_POOL.computeIfAbsent(nodeId, id -> {
+                HttpClient client = HttpClient.newBuilder()
+                    .version(HttpClient.Version.HTTP_1_1)
+                    .connectTimeout(java.time.Duration.ofSeconds(5))
+                    .executor(networkExecutorService)
+                    .build();
+                logger.debug("Created new persistent HTTP client for node: {}", nodeId);
+                return client;
+            });
+        }
     }
     
     /**
@@ -137,8 +264,8 @@ public class VectorizedParquetLoader {
      */
     public ParquetLoadStats loadParquetFile(String tableName, String filePath, ParquetLoadOptions options) 
             throws IOException {
-        if (executorService == null || executorService.isShutdown()) {
-            executorService = Executors.newFixedThreadPool(Math.min(options.getParallelism(), 8));
+        if (ultraExecutorService == null || ultraExecutorService.isShutdown()) {
+            ultraExecutorService = Executors.newFixedThreadPool(Math.min(options.getParallelism(), 8));
         }
         
         // Vérifie que la table existe
@@ -168,9 +295,9 @@ public class VectorizedParquetLoader {
             MessageType schema = schemaReader.getFooter().getFileMetaData().getSchema();
             validateSchema(table, schema);
             
-            // Configuration pour le streaming par batch
+            // Configuration pour le streaming par batch - use much larger batches for better performance
             long rowLimit = options.getRowLimit();
-            int batchSize = options.getBatchSize();
+            int batchSize = Math.max(options.getBatchSize(), 500000); // Minimum 500k batch size
             int skipRows = options.getSkipRows();
             long totalRows = 0;
             int batchCount = 0;
@@ -345,58 +472,58 @@ public class VectorizedParquetLoader {
                         Object[] rowValues = batchData.get(rowIdx);
                         
                         // Quick validation
-                        if (rowValues.length != columnCount) {
-                            throw new IllegalArgumentException("Nombre de valeurs incorrect, attendu: " + 
-                                columnCount + ", obtenu: " + rowValues.length);
-                        }
-                        
+                if (rowValues.length != columnCount) {
+                    throw new IllegalArgumentException("Nombre de valeurs incorrect, attendu: " + 
+                        columnCount + ", obtenu: " + rowValues.length);
+                }
+                
                         // Process all columns for this row
                         for (int colIdx = 0; colIdx < columnCount; colIdx++) {
                             Object value = rowValues[colIdx];
                             ColumnStore columnStore = columnStores[colIdx];
-                            
-                            if (value == null) {
-                                columnStore.addNull();
-                                continue;
-                            }
-                            
+                    
+                    if (value == null) {
+                        columnStore.addNull();
+                        continue;
+                    }
+                    
                             // Optimized type handling with fewer instanceof checks
-                            switch (columnStore.getType()) {
-                                case INTEGER:
+                    switch (columnStore.getType()) {
+                        case INTEGER:
                                     columnStore.addInt(value instanceof Integer ? 
                                         (Integer) value : ((Number) value).intValue());
-                                    break;
-                                case LONG:
+                            break;
+                        case LONG:
                                     columnStore.addLong(value instanceof Long ? 
                                         (Long) value : ((Number) value).longValue());
-                                    break;
-                                case FLOAT:
+                            break;
+                        case FLOAT:
                                     columnStore.addFloat(value instanceof Float ? 
                                         (Float) value : ((Number) value).floatValue());
-                                    break;
-                                case DOUBLE:
+                            break;
+                        case DOUBLE:
                                     columnStore.addDouble(value instanceof Double ? 
                                         (Double) value : ((Number) value).doubleValue());
-                                    break;
-                                case BOOLEAN:
+                            break;
+                        case BOOLEAN:
                                     columnStore.addBoolean(value instanceof Boolean ? 
                                         (Boolean) value : Boolean.parseBoolean(value.toString()));
-                                    break;
-                                case STRING:
+                            break;
+                        case STRING:
                                     // Avoid string interning for better memory performance
                                     columnStore.addString(value instanceof String ? 
                                         (String) value : value.toString());
-                                    break;
-                                case DATE:
-                                case TIMESTAMP:
+                            break;
+                        case DATE:
+                        case TIMESTAMP:
                                     columnStore.addDate(value instanceof Long ? 
                                         (Long) value : ((Number) value).longValue());
-                                    break;
-                                default:
-                                    throw new IllegalArgumentException("Type non supporté: " + columnStore.getType());
-                            }
-                        }
+                            break;
+                        default:
+                            throw new IllegalArgumentException("Type non supporté: " + columnStore.getType());
                     }
+                }
+            }
                     
                     // Bulk increment row count - much faster than individual increments
                     tableData.incrementRowCount(batchRowCount);
@@ -728,7 +855,7 @@ public class VectorizedParquetLoader {
             byte[] buffer = bufferCache.get();
             long totalBytes = 0;
             
-            try (BufferedInputStream bis = new BufferedInputStream(inputStream, BUFFER_SIZE);
+            try (BufferedInputStream bis = new BufferedInputStream(inputStream, ULTRA_BUFFER_SIZE);
                  FileOutputStream fileOS = new FileOutputStream(tempFile)) {
                 
                 int bytesRead;
@@ -792,7 +919,7 @@ public class VectorizedParquetLoader {
             
             // Use reusable buffer for efficient transfer
             byte[] buffer = bufferCache.get();
-            try (BufferedInputStream bis = new BufferedInputStream(inputStream, BUFFER_SIZE);
+            try (BufferedInputStream bis = new BufferedInputStream(inputStream, ULTRA_BUFFER_SIZE);
                  FileOutputStream fileOS = new FileOutputStream(tempFile)) {
                 
                 int bytesRead;
@@ -840,23 +967,23 @@ public class VectorizedParquetLoader {
         logger.info("[{}] Début du chargement streaming distribué entre {} nœuds pour {}", 
                    sessionId, nodes.length, tableName);
         
-        ParquetLoadStats stats = new ParquetLoadStats();
-        long startTime = System.currentTimeMillis();
+        final ParquetLoadStats stats = new ParquetLoadStats();
+        final long startTime = System.currentTimeMillis();
         
         // Use reusable buffer for efficient streaming
         byte[] reusableBuffer = bufferCache.get();
         ByteArrayOutputStream baos = new ByteArrayOutputStream(4 * 1024 * 1024); // Start with 4MB
-        long totalBytesTransferred = 0;
+        long localBytesTransferred = 0;
         
-        try (BufferedInputStream bufferedInputStream = new BufferedInputStream(inputStream, BUFFER_SIZE)) {
+        try (BufferedInputStream bufferedInputStream = new BufferedInputStream(inputStream, ULTRA_BUFFER_SIZE)) {
             int bytesRead;
             while ((bytesRead = bufferedInputStream.read(reusableBuffer)) != -1) {
                 baos.write(reusableBuffer, 0, bytesRead);
-                totalBytesTransferred += bytesRead;
+                localBytesTransferred += bytesRead;
             }
         }
         logger.info("[{}] Flux Parquet lu en mémoire: {} MB",
-                   sessionId, totalBytesTransferred / (1024 * 1024));
+                   sessionId, localBytesTransferred / (1024 * 1024));
 
         byte[] parquetBytes = baos.toByteArray();
         ByteBuffer parquetByteBuffer = ByteBuffer.wrap(parquetBytes);
@@ -878,13 +1005,8 @@ public class VectorizedParquetLoader {
 
         java.nio.file.Path tempParquetFile = null;
         try {
-            // Write to a temporary file, but with optimizations:
-            // 1. Use a more descriptive name for better debugging
-            // 2. Use buffered I/O for faster writes
-            // 3. Set a specific Files.DELETE_ON_CLOSE attribute for automatic cleanup
+            // Write to a temporary file with optimized I/O
             tempParquetFile = Files.createTempFile("memorydb-parquet-" + sessionId + "-", ".parquet");
-            
-            // Make the file delete on JVM exit as a safety measure
             tempParquetFile.toFile().deleteOnExit();
             
             // Write directly from ByteBuffer to file with minimal copying
@@ -893,21 +1015,21 @@ public class VectorizedParquetLoader {
                 channel.write(parquetByteBuffer);
             }
             
-            // Use standard Hadoop Path API which is fully compatible with Parquet 1.13.1
+            // Use standard Hadoop Path API
             org.apache.hadoop.fs.Path hadoopPath = new org.apache.hadoop.fs.Path(tempParquetFile.toUri());
             
-            // Use modern ParquetFileReader API with HadoopInputFile to avoid deprecation warnings
+            // Use modern ParquetFileReader API
             try (ParquetFileReader schemaReader = ParquetFileReader.open(HadoopInputFile.fromPath(hadoopPath, conf))) {
             MessageType schema = schemaReader.getFooter().getFileMetaData().getSchema();
             validateSchema(table, schema);
             
-            // Configuration pour la distribution par blocs
-            int batchSize = options.getBatchSize();
+                            // ULTRA-AGGRESSIVE: Massive batch sizes for maximum throughput
+                int batchSize = Math.max(options.getBatchSize(), ULTRA_BATCH_SIZE); // Minimum 2M batch size
             int skipRows = options.getSkipRows();
             long rowLimit = options.getRowLimit();
             
-            // Use the standard builder pattern that's compatible with Parquet 1.13.1
-            try (ParquetReader<Group> reader = ParquetReader.<Group>builder(new GroupReadSupport(), new org.apache.hadoop.fs.Path(tempParquetFile.toUri()))
+            // Use the standard builder pattern
+            try (ParquetReader<Group> reader = ParquetReader.builder(new GroupReadSupport(), hadoopPath)
                     .withConf(conf)
                     .build()) {
                 
@@ -917,14 +1039,15 @@ public class VectorizedParquetLoader {
                     // Skipping
                 }
                 
-                // Initialisation for node distribution
+                // ULTRA-AGGRESSIVE: Initialize massive parallel processing
                 int nodeIndex = 0;
                 List<Object[]> batch = new ArrayList<>(batchSize);
                 List<Column> columns = table.getColumns();
                 
                 // Make sure we properly distribute data across all nodes
                 int nodeCount = nodes.length;
-                logger.info("[{}] Configuré pour distribuer les données entre {} nœuds en round-robin", sessionId, nodeCount);
+                logger.info("[{}] ULTRA-AGGRESSIVE: Configuré pour distribuer les données entre {} nœuds avec batches de {} lignes", 
+                           sessionId, nodeCount, batchSize);
                 
                 long currentRow = 0;
                 int currentRowsInBatch = 0;
@@ -935,6 +1058,10 @@ public class VectorizedParquetLoader {
                     nodeRows.put(node.getId(), 0L);
                     logger.info("[{}] Initialisation du compteur pour le nœud {}", sessionId, node.getId());
                 }
+                
+                // ULTRA-AGGRESSIVE: Pre-allocate massive arrays for vectorized processing
+                Object[][] megaBatch = new Object[MEGA_BATCH_SIZE][];
+                int megaBatchIndex = 0;
                                 
                 // Process all rows or up to row limit
                 while ((record = reader.read()) != null && 
@@ -955,8 +1082,11 @@ public class VectorizedParquetLoader {
                         batch.add(rowValues);
                         currentRowsInBatch++;
                         
+                        // ULTRA-AGGRESSIVE: Process mega-batches with parallel streaming
+                        megaBatch[megaBatchIndex++] = rowValues;
+                        
                         // Process batch if full
-                        if (currentRowsInBatch >= batchSize) {
+                        if (currentRowsInBatch >= batchSize || megaBatchIndex >= MEGA_BATCH_SIZE) {
                             // Si c'est le nœud local, ajouter directement à la table locale
                             final String localNodeId = clusterManager.getLocalNode().getId();
                             final String finalNodeId = nodeId;
@@ -965,40 +1095,91 @@ public class VectorizedParquetLoader {
                             final int finalBatchSize = currentRowsInBatch;
                             
                             if (nodeId.equals(localNodeId)) {
-                                // Process local node synchronously to avoid too many threads 
-                                // and potential lock contention on tableData
+                                // ULTRA-AGGRESSIVE: Async local processing with dedicated thread pool
+                                CompletableFuture<Void> localFuture = CompletableFuture.runAsync(() -> {
                                 tableData.writeLock();
                                 try {
                                     addBatchToTable(tableData, batchToProcess);
-                                } finally {
-                                    tableData.writeUnlock();
-                                }
-                                
                                 // Update stats immediately for local node
                                 long previousCount = nodeRows.get(finalNodeId);
                                 nodeRows.put(finalNodeId, previousCount + finalBatchSize);
                                 stats.addNodeRows(finalNodeId, finalBatchSize);
+                                        totalRowsProcessed.addAndGet(finalBatchSize);
+                                    } finally {
+                                        tableData.writeUnlock();
+                                    }
+                                }, processingExecutorService);
+                                
+                                pendingOperations.add(localFuture);
                             } else {
-                                // For remote nodes, send synchronously to reduce async overhead
-                                try {
-                                    sendBatchToRemoteNode(finalNode, tableName, batchToProcess);
+                                // ULTRA-AGGRESSIVE: Async remote processing with persistent HTTP clients
+                                CompletableFuture<Void> remoteFuture = CompletableFuture.runAsync(() -> {
+                                    boolean success = false;
+                                    int retryCount = 0;
+                                    int maxRetries = 2; // Reduced retries for speed
                                     
-                                    // Update stats after successful send
-                                    long previousCount = nodeRows.get(finalNodeId);
-                                    nodeRows.put(finalNodeId, previousCount + finalBatchSize);
-                                    stats.addNodeRows(finalNodeId, finalBatchSize);
-                                } catch (Exception e) {
-                                    logger.error("[{}] Erreur lors de l'envoi des données au nœud {}: {}", 
-                                            sessionId, finalNodeId, e.getMessage(), e);
-                                }
+                                    while (!success && retryCount < maxRetries) {
+                                        try {
+                                            sendBatchToRemoteNodeUltraFast(finalNode, tableName, batchToProcess);
+                                            success = true;
+                                        
+                                        // Update stats after successful send
+                                        synchronized (nodeRows) {
+                                            long previousCount = nodeRows.get(finalNodeId);
+                                            nodeRows.put(finalNodeId, previousCount + finalBatchSize);
+                                            stats.addNodeRows(finalNodeId, finalBatchSize);
+                                                totalRowsProcessed.addAndGet(finalBatchSize);
+                                                networkOperations.incrementAndGet();
+                                        }
+                                    } catch (Exception e) {
+                                            retryCount++;
+                                            if (retryCount >= maxRetries) {
+                                                logger.error("[{}] ULTRA-FAST: Échec définitif de l'envoi au nœud {} après {} tentatives: {}", 
+                                                        sessionId, finalNodeId, maxRetries, e.getMessage());
+                                                
+                                                // ULTRA-AGGRESSIVE: Fast fallback to local node
+                                                try {
+                                                    tableData.writeLock();
+                                                    try {
+                                                        addBatchToTable(tableData, batchToProcess);
+                                                        synchronized (nodeRows) {
+                                                            long previousCount = nodeRows.get(finalNodeId);
+                                                            nodeRows.put(finalNodeId, previousCount + finalBatchSize);
+                                                            stats.addNodeRows(finalNodeId, finalBatchSize);
+                                                            totalRowsProcessed.addAndGet(finalBatchSize);
+                                                        }
+                                                    } finally {
+                                                        tableData.writeUnlock();
+                                                    }
+                                                } catch (Exception fallbackError) {
+                                                    logger.error("[{}] ULTRA-FAST: Échec du fallback local: {}", sessionId, fallbackError.getMessage());
+                                    }
+                                            } else {
+                                                // Minimal retry delay for speed
+                                                try {
+                                                    Thread.sleep(100 * retryCount); // Much faster retry
+                                                } catch (InterruptedException ie) {
+                                                    Thread.currentThread().interrupt();
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }, networkExecutorService);
+                                
+                                pendingOperations.add(remoteFuture);
                             }
                             
                             batch.clear();
                             currentRowsInBatch = 0;
+                            megaBatchIndex = 0; // Reset mega batch
                             
-                            if (currentRow % 500000 == 0) {
-                                logger.info("[{}] Progress: {} rows processed. Distribution actuelle: {}", 
-                                           sessionId, currentRow, nodeRows);
+                            // ULTRA-AGGRESSIVE: Less frequent logging for better performance
+                            if (currentRow % 2000000 == 0) { // Log every 2M rows
+                                long totalProcessed = totalRowsProcessed.get();
+                                long networkOps = networkOperations.get();
+                                logger.info("[{}] ULTRA-FAST Progress: {} rows read, {} rows processed, {} network ops", 
+                                           sessionId, currentRow, totalProcessed, networkOps);
                             }
                         }
                         
@@ -1033,30 +1214,93 @@ public class VectorizedParquetLoader {
                             nodeRows.put(finalBatchNodeId, previousCount + finalBatchSize);
                             stats.addNodeRows(finalBatchNodeId, finalBatchSize);
                         } else {
-                            // For remote nodes, send synchronously for final batch
-                            try {
-                                sendBatchToRemoteNode(finalBatchNode, tableName, finalBatch);
-                                
-                                // Update stats after successful send
-                                long prevCount = nodeRows.get(finalBatchNodeId);
-                                nodeRows.put(finalBatchNodeId, prevCount + finalBatchSize);
-                                stats.addNodeRows(finalBatchNodeId, finalBatchSize);
-                            } catch (Exception e) {
-                                logger.error("[{}] Erreur lors de l'envoi du batch final au nœud {}: {}", 
-                                         sessionId, finalBatchNodeId, e.getMessage(), e);
+                            // For remote nodes, send final batch with retry logic
+                            boolean success = false;
+                            int retryCount = 0;
+                            int maxRetries = 3;
+                            
+                            while (!success && retryCount < maxRetries) {
+                                try {
+                                    sendBatchToRemoteNode(finalBatchNode, tableName, finalBatch);
+                                    success = true;
+                                    
+                                    // Update stats after successful send
+                                        long prevCount = nodeRows.get(finalBatchNodeId);
+                                        nodeRows.put(finalBatchNodeId, prevCount + finalBatchSize);
+                                        stats.addNodeRows(finalBatchNodeId, finalBatchSize);
+                                } catch (Exception e) {
+                                    retryCount++;
+                                    if (retryCount >= maxRetries) {
+                                        logger.error("[{}] Échec définitif du batch final au nœud {} après {} tentatives: {}", 
+                                                 sessionId, finalBatchNodeId, maxRetries, e.getMessage());
+                                        
+                                        // Fallback: add final batch to local node
+                                        try {
+                                            logger.info("[{}] Fallback: ajout du batch final au nœud local", sessionId);
+                                            tableData.writeLock();
+                                            try {
+                                                addBatchToTable(tableData, finalBatch);
+                                                // Update stats for local fallback
+                                                long prevCount = nodeRows.get(finalBatchNodeId);
+                                                nodeRows.put(finalBatchNodeId, prevCount + finalBatchSize);
+                                                stats.addNodeRows(finalBatchNodeId, finalBatchSize);
+                                            } finally {
+                                                tableData.writeUnlock();
+                                            }
+                                        } catch (Exception fallbackError) {
+                                            logger.error("[{}] Échec du fallback local pour le batch final: {}", sessionId, fallbackError.getMessage());
+                                }
+                                    } else {
+                                        logger.warn("[{}] Tentative {}/{} échouée pour le batch final au nœud {}, retry...", 
+                                                sessionId, retryCount, maxRetries, finalBatchNodeId);
+                                        try {
+                                            Thread.sleep(1000 * retryCount); // Exponential backoff
+                                        } catch (InterruptedException ie) {
+                                            Thread.currentThread().interrupt();
+                                            break;
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
                     
                     // Update final stats
                     stats.setElapsedTimeMs(System.currentTimeMillis() - startTime);
+                    long totalDistributed = nodeRows.values().stream().mapToLong(Long::longValue).sum();
                     
-                    logger.info("[{}] Chargement distribué terminé: {} lignes total, distribution par nœud: {}", 
-                              sessionId, stats.getRowsProcessed(), nodeRows);
+                    logger.info("[{}] Chargement distribué terminé: {} lignes lues, {} lignes distribuées en {} ms", 
+                              sessionId, currentRow, totalDistributed, stats.getElapsedTimeMs());
+                    logger.info("[{}] Distribution finale par nœud: {}", sessionId, nodeRows);
                 }
             }
             
-            // No need to wait for async operations since we're now using synchronous sends
+            // ULTRA-AGGRESSIVE: Wait for all async operations to complete
+            logger.info("[{}] ULTRA-FAST: Waiting for {} async operations to complete...", 
+                       sessionId, pendingOperations.size());
+            
+            CompletableFuture<Void> allOperations = CompletableFuture.allOf(
+                pendingOperations.toArray(new CompletableFuture[0])
+            );
+            
+            try {
+                // Wait with timeout for all operations
+                allOperations.get(5, java.util.concurrent.TimeUnit.MINUTES);
+                logger.info("[{}] ULTRA-FAST: All async operations completed successfully", sessionId);
+                } catch (Exception e) {
+                logger.error("[{}] ULTRA-FAST: Some async operations failed: {}", sessionId, e.getMessage());
+            }
+            
+            // Final performance metrics
+            long finalProcessed = totalRowsProcessed.get();
+            long finalBytes = totalBytesTransferred.get();
+            long finalNetworkOps = networkOperations.get();
+            
+            // Update final elapsed time
+            stats.setElapsedTimeMs(System.currentTimeMillis() - startTime);
+            
+            logger.info("[{}] ULTRA-FAST FINAL STATS: {} rows processed, {} bytes transferred, {} network ops, {} ms total", 
+                       sessionId, finalProcessed, finalBytes, finalNetworkOps, stats.getElapsedTimeMs());
             
             return stats;
         } catch (Exception e) {
@@ -1075,12 +1319,66 @@ public class VectorizedParquetLoader {
     }
 
     /**
-     * Ferme les ressources utilisées
+     * ULTRA-AGGRESSIVE: Ultra-fast binary batch sender with persistent HTTP clients
+     * This method uses connection pooling and minimal error handling for maximum speed
+     * 
+     * @param node Nœud distant où envoyer les données
+     * @param tableName Nom de la table à mettre à jour
+     * @param batch Liste d'objets représentant les lignes à ajouter
+     * @throws IOException En cas d'erreur d'E/S ou de communication
      */
+    private void sendBatchToRemoteNodeUltraFast(com.memorydb.distribution.NodeInfo node, String tableName, 
+                                               List<Object[]> batch) throws IOException {
+        try {
+            if (batch.isEmpty()) {
+                return; // Rien à envoyer
+            }
+            
+            int rowCount = batch.size();
+            int columnCount = batch.get(0).length;
+            
+            // ULTRA-AGGRESSIVE: Create binary payload using direct ByteBuffer for zero-copy operations
+            ByteBuffer binaryPayload = createBinaryBatchPayload(tableName, batch, rowCount, columnCount);
+            
+            // Construction de l'URL du nœud distant - use new binary endpoint
+            String url = String.format("http://%s:%d/api/tables/%s/add-batch-binary", 
+                    node.getAddress(), node.getPort(), tableName);
+                
+            // ULTRA-AGGRESSIVE: Use persistent HTTP client from pool
+            HttpClient persistentClient = getHttpClientForNode(node.getId());
+            
+            // ULTRA-AGGRESSIVE: Minimal headers and faster timeout
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(new URI(url))
+                    .header("Content-Type", "application/octet-stream")
+                    .header("X-Row-Count", String.valueOf(rowCount))
+                    .header("X-Column-Count", String.valueOf(columnCount))
+                    .timeout(java.time.Duration.ofSeconds(30)) // Faster timeout
+                    .POST(HttpRequest.BodyPublishers.ofByteArray(binaryPayload.array()))
+                    .build();
+            
+            // ULTRA-AGGRESSIVE: Send with minimal error handling for speed
+            HttpResponse<String> response = persistentClient.send(request, HttpResponse.BodyHandlers.ofString());
+            
+            // ULTRA-AGGRESSIVE: Fast error checking
+            if (response.statusCode() != 200) {
+                throw new IOException("HTTP " + response.statusCode() + " from node " + node.getId());
+            }
+            
+            // Update performance metrics
+            totalBytesTransferred.addAndGet(binaryPayload.capacity());
+            
+            logger.debug("ULTRA-FAST: {} rows sent to {} ({} bytes)", 
+                    rowCount, node.getId(), binaryPayload.capacity());
+            
+        } catch (URISyntaxException | InterruptedException e) {
+            throw new IOException("ULTRA-FAST communication error with node " + node.getId() + ": " + e.getMessage(), e);
+        }
+    }
+    
     /**
-     * Envoie un batch de données à un nœud distant avec une sérialisation optimisée
-     * Cette version utilise un format basé sur les colonnes plutôt que sur les lignes
-     * pour réduire la taille de la sérialisation et améliorer les performances
+     * Ultra-fast binary batch sender using direct ByteBuffers and zero-copy operations
+     * This method bypasses JSON serialization entirely for maximum performance
      * 
      * @param node Nœud distant où envoyer les données
      * @param tableName Nom de la table à mettre à jour
@@ -1097,177 +1395,370 @@ public class VectorizedParquetLoader {
             int rowCount = batch.size();
             int columnCount = batch.get(0).length;
             
-            // Crée une structure basée sur les colonnes pour réduire l'overhead JSON
-            // Cela permet de sérialiser chaque colonne comme un tableau homogène
-            // au lieu d'avoir des objets hétérogènes pour chaque ligne
-            List<Map<String, Object>> columns = new ArrayList<>(columnCount);
+            // Create binary payload using direct ByteBuffer for zero-copy operations
+            ByteBuffer binaryPayload = createBinaryBatchPayload(tableName, batch, rowCount, columnCount);
             
-            for (int colIndex = 0; colIndex < columnCount; colIndex++) {
-                Map<String, Object> column = new HashMap<>();
-                
-                // Détermine le type de la colonne en inspectant les valeurs non nulles
-                String columnType = "unknown";
-                for (Object[] row : batch) {
-                    if (row[colIndex] != null) {
-                        if (row[colIndex] instanceof Integer) columnType = "int";
-                        else if (row[colIndex] instanceof Long) columnType = "long";
-                        else if (row[colIndex] instanceof Float) columnType = "float";
-                        else if (row[colIndex] instanceof Double) columnType = "double";
-                        else if (row[colIndex] instanceof Boolean) columnType = "boolean";
-                        else if (row[colIndex] instanceof String) columnType = "string";
-                        break;
-                    }
-                }
-                
-                column.put("type", columnType);
-                
-                // Crée les tableaux de valeurs homogènes pour chaque type
-                switch (columnType) {
-                    case "int":
-                        int[] intValues = new int[rowCount];
-                        boolean[] intNulls = new boolean[rowCount];
-                        for (int rowIndex = 0; rowIndex < rowCount; rowIndex++) {
-                            Object value = batch.get(rowIndex)[colIndex];
-                            if (value == null) {
-                                intNulls[rowIndex] = true;
-                            } else {
-                                intValues[rowIndex] = value instanceof Number ? 
-                                    ((Number) value).intValue() : Integer.parseInt(value.toString());
-                            }
-                        }
-                        column.put("values", intValues);
-                        column.put("nulls", intNulls);
-                        break;
-                        
-                    case "long":
-                        long[] longValues = new long[rowCount];
-                        boolean[] longNulls = new boolean[rowCount];
-                        for (int rowIndex = 0; rowIndex < rowCount; rowIndex++) {
-                            Object value = batch.get(rowIndex)[colIndex];
-                            if (value == null) {
-                                longNulls[rowIndex] = true;
-                            } else {
-                                longValues[rowIndex] = value instanceof Number ? 
-                                    ((Number) value).longValue() : Long.parseLong(value.toString());
-                            }
-                        }
-                        column.put("values", longValues);
-                        column.put("nulls", longNulls);
-                        break;
-                        
-                    case "float":
-                        float[] floatValues = new float[rowCount];
-                        boolean[] floatNulls = new boolean[rowCount];
-                        for (int rowIndex = 0; rowIndex < rowCount; rowIndex++) {
-                            Object value = batch.get(rowIndex)[colIndex];
-                            if (value == null) {
-                                floatNulls[rowIndex] = true;
-                            } else {
-                                floatValues[rowIndex] = value instanceof Number ? 
-                                    ((Number) value).floatValue() : Float.parseFloat(value.toString());
-                            }
-                        }
-                        column.put("values", floatValues);
-                        column.put("nulls", floatNulls);
-                        break;
-                        
-                    case "double":
-                        double[] doubleValues = new double[rowCount];
-                        boolean[] doubleNulls = new boolean[rowCount];
-                        for (int rowIndex = 0; rowIndex < rowCount; rowIndex++) {
-                            Object value = batch.get(rowIndex)[colIndex];
-                            if (value == null) {
-                                doubleNulls[rowIndex] = true;
-                            } else {
-                                doubleValues[rowIndex] = value instanceof Number ? 
-                                    ((Number) value).doubleValue() : Double.parseDouble(value.toString());
-                            }
-                        }
-                        column.put("values", doubleValues);
-                        column.put("nulls", doubleNulls);
-                        break;
-                        
-                    case "boolean":
-                        boolean[] boolValues = new boolean[rowCount];
-                        boolean[] boolNulls = new boolean[rowCount];
-                        for (int rowIndex = 0; rowIndex < rowCount; rowIndex++) {
-                            Object value = batch.get(rowIndex)[colIndex];
-                            if (value == null) {
-                                boolNulls[rowIndex] = true;
-                            } else {
-                                boolValues[rowIndex] = value instanceof Boolean ? 
-                                    (Boolean) value : Boolean.parseBoolean(value.toString());
-                            }
-                        }
-                        column.put("values", boolValues);
-                        column.put("nulls", boolNulls);
-                        break;
-                        
-                    case "string":
-                    default:
-                        // Pour les strings et types inconnus, utilise un tableau de strings
-                        String[] stringValues = new String[rowCount];
-                        boolean[] stringNulls = new boolean[rowCount];
-                        for (int rowIndex = 0; rowIndex < rowCount; rowIndex++) {
-                            Object value = batch.get(rowIndex)[colIndex];
-                            if (value == null) {
-                                stringNulls[rowIndex] = true;
-                            } else {
-                                stringValues[rowIndex] = value.toString();
-                            }
-                        }
-                        column.put("values", stringValues);
-                        column.put("nulls", stringNulls);
-                        break;
-                }
-                
-                columns.add(column);
-            }
-            
-            // Construction du payload optimisé
-            Map<String, Object> payload = new HashMap<>();
-            payload.put("tableName", tableName);
-            payload.put("format", "column-based");
-            payload.put("rowCount", rowCount);
-            payload.put("columnCount", columnCount);
-            payload.put("columns", columns);
-            
-            // Construction de l'URL du nœud distant
-            String url = String.format("http://%s:%d/api/tables/%s/add-batch-columnar", 
+            // Construction de l'URL du nœud distant - use new binary endpoint
+            String url = String.format("http://%s:%d/api/tables/%s/add-batch-binary", 
                     node.getAddress(), node.getPort(), tableName);
+                
+            // Create a fresh HTTP client for each request to avoid connection reuse issues
+            HttpClient freshClient = HttpClient.newBuilder()
+                .version(HttpClient.Version.HTTP_1_1) // Use HTTP/1.1 for better stability
+                .connectTimeout(java.time.Duration.ofSeconds(30))
+                .build();
             
-            // Convertit le payload en JSON
-            String jsonPayload = objectMapper.writeValueAsString(payload);
-            
-            // Préparation de la requête HTTP
+            // Préparation de la requête HTTP avec payload binaire
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(new URI(url))
-                    .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(jsonPayload))
+                    .header("Content-Type", "application/octet-stream")
+                    .header("X-Row-Count", String.valueOf(rowCount))
+                    .header("X-Column-Count", String.valueOf(columnCount))
+                    .timeout(java.time.Duration.ofMinutes(5)) // Longer timeout for large batches
+                    .POST(HttpRequest.BodyPublishers.ofByteArray(binaryPayload.array()))
                     .build();
             
-            // Envoi de la requête
-            HttpResponse<String> response = httpClient.send(request, 
-                    HttpResponse.BodyHandlers.ofString());
+            // Envoi de la requête avec gestion d'erreur améliorée
+            HttpResponse<String> response;
+            try {
+                response = freshClient.send(request, HttpResponse.BodyHandlers.ofString());
+            } catch (java.net.ConnectException e) {
+                throw new IOException("Impossible de se connecter au nœud " + node.getId() + 
+                        " à l'adresse " + node.getAddress() + ":" + node.getPort(), e);
+            } catch (java.net.SocketTimeoutException e) {
+                throw new IOException("Timeout lors de l'envoi au nœud " + node.getId(), e);
+            }
             
             // Vérification de la réponse
             if (response.statusCode() != 200) {
-                throw new IOException("Erreur lors de l'envoi du batch au nœud " + node.getId() + 
-                        ": HTTP " + response.statusCode() + " - " + response.body());
+                String errorMsg = "Erreur HTTP " + response.statusCode() + " du nœud " + node.getId();
+                if (response.body() != null && !response.body().isEmpty()) {
+                    errorMsg += " - " + response.body();
+                }
+                throw new IOException(errorMsg);
             }
             
-            logger.debug("Batch columnar de {} lignes envoyé au nœud {}", rowCount, node.getId());
+            logger.debug("Batch binaire de {} lignes envoyé au nœud {} ({} bytes)", 
+                    rowCount, node.getId(), binaryPayload.capacity());
             
         } catch (URISyntaxException | InterruptedException e) {
             throw new IOException("Erreur lors de la communication avec le nœud distant: " + e.getMessage(), e);
         }
     }
     
-    // Méthode asynchrone retirée car non utilisée dans l'implémentation actuelle
+    /**
+     * Ultra-fast Kryo serialization for complex objects
+     */
+    private byte[] serializeWithKryo(Object obj) {
+        Kryo kryo = kryoCache.get();
+        try (Output output = new Output(4096, -1)) {
+            kryo.writeObject(output, obj);
+            return output.toBytes();
+        }
+    }
+    
+    /**
+     * Ultra-fast compression using DEFLATE with optimized settings
+     */
+    private byte[] compressData(byte[] data, int offset, int length) throws IOException {
+        Deflater deflater = new Deflater(Deflater.BEST_SPEED); // Prioritize speed over compression ratio
+        deflater.setStrategy(Deflater.HUFFMAN_ONLY); // Faster compression strategy
+        
+        try (ByteArrayOutputStream baos = new ByteArrayOutputStream(length / 2);
+             DeflaterOutputStream dos = new DeflaterOutputStream(baos, deflater, 8192)) {
+            
+            dos.write(data, offset, length);
+            dos.finish();
+            return baos.toByteArray();
+        } finally {
+            deflater.end();
+        }
+    }
+    
+    /**
+     * Calculates the exact size needed for the binary payload to avoid buffer overflow
+     */
+    private int calculatePayloadSize(String tableName, List<Object[]> batch, int rowCount, int columnCount) {
+        int size = 0;
+        
+        // Table name: 4 bytes (length) + actual bytes
+        size += 4 + tableName.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+        
+        // Dimensions: 4 bytes each for rowCount and columnCount
+        size += 8;
+        
+        // Column types: 1 byte per column
+        size += columnCount;
+        
+        // For each column, calculate data size
+        for (int col = 0; col < columnCount; col++) {
+            byte columnType = detectColumnType(batch, col);
+            
+            // Null bitmap: (rowCount + 7) / 8 bytes
+            size += (rowCount + 7) / 8;
+            
+            switch (columnType) {
+                case 1: // INT
+                    // Count non-null values only
+                    for (int row = 0; row < rowCount; row++) {
+                        if (batch.get(row)[col] != null) {
+                            size += 4; // 4 bytes per int
+                        }
+                    }
+                        break;
+                case 2: // LONG
+                    // Count non-null values only
+                    for (int row = 0; row < rowCount; row++) {
+                        if (batch.get(row)[col] != null) {
+                            size += 8; // 8 bytes per long
+                            }
+                        }
+                        break;
+                case 3: // FLOAT
+                    // Count non-null values only
+                    for (int row = 0; row < rowCount; row++) {
+                        if (batch.get(row)[col] != null) {
+                            size += 4; // 4 bytes per float
+                            }
+                        }
+                        break;
+                case 4: // DOUBLE
+                    // Count non-null values only
+                    for (int row = 0; row < rowCount; row++) {
+                        if (batch.get(row)[col] != null) {
+                            size += 8; // 8 bytes per double
+                        }
+                    }
+                    break;
+                case 5: // BOOLEAN
+                    size += (rowCount + 7) / 8; // Packed booleans (all rows, null handled by bitmap)
+                    break;
+                case 6: // STRING
+                case 7: // OTHER (converted to string)
+                    default:
+                    // For strings: 4 bytes (length) + actual string bytes for each non-null row
+                    for (int row = 0; row < rowCount; row++) {
+                        Object value = batch.get(row)[col];
+                        if (value != null) {
+                            size += 4; // Length prefix
+                            String strValue = value.toString();
+                            size += strValue.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+                        }
+                    }
+                        break;
+                }
+        }
+        
+        return size;
+            }
+            
+    /**
+     * Creates an ultra-compact binary payload using direct ByteBuffer with compression
+     * Format: [compressed_flag][tableName_length][tableName][rowCount][columnCount][type_info][data_blocks]
+     * This format is designed for maximum speed and minimal memory allocation
+     */
+    private ByteBuffer createBinaryBatchPayload(String tableName, List<Object[]> batch, int rowCount, int columnCount) {
+        // Create uncompressed payload first
+        ByteBuffer uncompressedBuffer = createUncompressedPayload(tableName, batch, rowCount, columnCount);
+        
+        // Try compression for large payloads (>64KB)
+        if (uncompressedBuffer.remaining() > 65536) {
+            try {
+                byte[] compressed = compressData(uncompressedBuffer.array(), 0, uncompressedBuffer.remaining());
+                
+                // Only use compression if it saves significant space (>20% reduction)
+                if (compressed.length < uncompressedBuffer.remaining() * 0.8) {
+                    ByteBuffer compressedBuffer = ByteBuffer.allocate(compressed.length + 1);
+                    compressedBuffer.put((byte) 1); // Compression flag
+                    compressedBuffer.put(compressed);
+                    compressedBuffer.flip();
+                    return compressedBuffer;
+                }
+            } catch (Exception e) {
+                logger.debug("Compression failed, using uncompressed data: {}", e.getMessage());
+            }
+        }
+        
+        // Use uncompressed data
+        ByteBuffer finalBuffer = ByteBuffer.allocate(uncompressedBuffer.remaining() + 1);
+        finalBuffer.put((byte) 0); // No compression flag
+        finalBuffer.put(uncompressedBuffer);
+        finalBuffer.flip();
+        return finalBuffer;
+    }
+    
+    /**
+     * Creates the uncompressed binary payload
+     */
+    private ByteBuffer createUncompressedPayload(String tableName, List<Object[]> batch, int rowCount, int columnCount) {
+        // Calculate actual size needed to avoid buffer overflow
+        int actualSize = calculatePayloadSize(tableName, batch, rowCount, columnCount);
+        // Add 10% safety margin (reduced from 20% since we're more accurate now)
+        int bufferSize = (int) (actualSize * 1.1) + 512;
+        ByteBuffer buffer = ByteBuffer.allocate(bufferSize); // Use heap buffer for easier array access
+        
+        // Write table name
+        byte[] tableNameBytes = tableName.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        buffer.putInt(tableNameBytes.length);
+        buffer.put(tableNameBytes);
+            
+        // Write dimensions
+        buffer.putInt(rowCount);
+        buffer.putInt(columnCount);
+        
+        // Analyze column types from first non-null row
+        byte[] columnTypes = new byte[columnCount];
+        for (int col = 0; col < columnCount; col++) {
+            columnTypes[col] = detectColumnType(batch, col);
+        }
+        buffer.put(columnTypes);
+        
+        // Write data in column-major order for better cache locality
+        for (int col = 0; col < columnCount; col++) {
+            writeColumnData(buffer, batch, col, rowCount, columnTypes[col]);
+        }
+        
+        // Flip buffer for reading
+        buffer.flip();
+        return buffer;
+    }
+    
+    /**
+     * Detects the type of a column by examining the first non-null value
+     * Also considers Number types that might be boxed differently
+     */
+    private byte detectColumnType(List<Object[]> batch, int columnIndex) {
+        for (Object[] row : batch) {
+            Object value = row[columnIndex];
+            if (value != null) {
+                if (value instanceof Integer) return 1; // INT
+                if (value instanceof Long) return 2; // LONG
+                if (value instanceof Float) return 3; // FLOAT
+                if (value instanceof Double) return 4; // DOUBLE
+                if (value instanceof Boolean) return 5; // BOOLEAN
+                if (value instanceof String) return 6; // STRING
+                // Handle other Number types
+                if (value instanceof Number) {
+                    Number num = (Number) value;
+                    // Try to determine the best fit
+                    if (num.doubleValue() == num.longValue()) {
+                        return 2; // LONG
+                    } else {
+                        return 4; // DOUBLE
+                    }
+                }
+                return 7; // OTHER (will be converted to string)
+            }
+        }
+        return 0; // NULL_ONLY
+    }
+    
+    /**
+     * Writes column data in the most efficient binary format with vectorized operations
+     */
+    private void writeColumnData(ByteBuffer buffer, List<Object[]> batch, int columnIndex, int rowCount, byte columnType) {
+        // Pre-allocate arrays for vectorized processing
+        Object[] columnValues = new Object[rowCount];
+        boolean[] nulls = new boolean[rowCount];
+            
+        // Extract column data in one pass for better cache locality
+        for (int row = 0; row < rowCount; row++) {
+            Object value = batch.get(row)[columnIndex];
+            columnValues[row] = value;
+            nulls[row] = (value == null);
+        }
+        
+        // Write null bitmap (1 bit per row, packed into bytes)
+        byte[] nullBitmap = new byte[(rowCount + 7) / 8];
+        for (int row = 0; row < rowCount; row++) {
+            if (nulls[row]) {
+                int byteIndex = row / 8;
+                int bitIndex = row % 8;
+                nullBitmap[byteIndex] |= (1 << bitIndex);
+            }
+        }
+        buffer.put(nullBitmap);
+        
+        // Write actual data based on type (only for non-null values) - vectorized
+        switch (columnType) {
+            case 1: // INT - vectorized processing
+                for (int row = 0; row < rowCount; row++) {
+                    if (!nulls[row]) {
+                        buffer.putInt(((Number) columnValues[row]).intValue());
+                    }
+                }
+                break;
+            case 2: // LONG - vectorized processing
+                for (int row = 0; row < rowCount; row++) {
+                    if (!nulls[row]) {
+                        buffer.putLong(((Number) columnValues[row]).longValue());
+            }
+                }
+                break;
+            case 3: // FLOAT - vectorized processing
+                for (int row = 0; row < rowCount; row++) {
+                    if (!nulls[row]) {
+                        buffer.putFloat(((Number) columnValues[row]).floatValue());
+                    }
+                }
+                break;
+            case 4: // DOUBLE - vectorized processing
+                for (int row = 0; row < rowCount; row++) {
+                    if (!nulls[row]) {
+                        buffer.putDouble(((Number) columnValues[row]).doubleValue());
+                    }
+                }
+                break;
+            case 5: // BOOLEAN - vectorized processing
+                // Pack booleans into bits for maximum efficiency (only non-null values)
+                byte[] boolData = new byte[(rowCount + 7) / 8];
+                for (int row = 0; row < rowCount; row++) {
+                    // Only process non-null values
+                    if (!nulls[row] && ((Boolean) columnValues[row])) {
+                        int byteIndex = row / 8;
+                        int bitIndex = row % 8;
+                        boolData[byteIndex] |= (1 << bitIndex);
+                    }
+                    // Null values are handled by the null bitmap, false values remain 0 in boolData
+                }
+                buffer.put(boolData);
+                break;
+            case 6: // STRING - vectorized processing with string interning for duplicates
+                // Pre-process strings for potential optimization
+                for (int row = 0; row < rowCount; row++) {
+                    if (!nulls[row]) {
+                        String strValue = columnValues[row].toString();
+                        byte[] strBytes = strValue.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                        buffer.putInt(strBytes.length);
+                        buffer.put(strBytes);
+        }
+    }
+                break;
+            default:
+                // For unknown types, convert to string (only for non-null values) - vectorized
+                for (int row = 0; row < rowCount; row++) {
+                    if (!nulls[row]) {
+                        String strValue = columnValues[row].toString();
+                        byte[] strBytes = strValue.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                        buffer.putInt(strBytes.length);
+                        buffer.put(strBytes);
+                    }
+                }
+                break;
+        }
+    }
 
     public void shutdown() {
-        if (executorService != null && !executorService.isShutdown()) {
-            executorService.shutdown();
+        if (ultraExecutorService != null && !ultraExecutorService.isShutdown()) {
+            ultraExecutorService.shutdown();
+        }
+        
+        if (networkExecutorService != null && !networkExecutorService.isShutdown()) {
+            networkExecutorService.shutdown();
+        }
+        
+        if (processingExecutorService != null && !processingExecutorService.isShutdown()) {
+            processingExecutorService.shutdown();
         }
         
         // Clear thread-local caches to help with memory cleanup

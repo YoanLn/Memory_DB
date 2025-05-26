@@ -30,6 +30,9 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.nio.ByteBuffer;
+import java.util.zip.Inflater;
+import java.util.zip.InflaterInputStream;
 
 
 
@@ -636,8 +639,8 @@ public class TableResource {
             if (payload.containsKey("batchSize")) {
                 options.setBatchSize(((Number) payload.get("batchSize")).intValue());
             } else {
-                // Taille de batch par défaut optimisée pour réduire la consommation mémoire
-                options.setBatchSize(5000); 
+                // Taille de batch par défaut optimisée pour de meilleures performances
+                options.setBatchSize(500000); 
             }
             
             if (payload.containsKey("rowLimit")) {
@@ -1265,110 +1268,161 @@ public class TableResource {
     }
     
     /**
-     * Endpoint optimisé pour les environnements avec proxy - accepte des données binaires directement
-     * Charge un fichier Parquet via données binaires et le distribue entre les nœuds sans écriture sur disque
+     * Decompresses binary data if compression flag is set
+     */
+    private ByteBuffer decompressIfNeeded(byte[] binaryData) throws IOException {
+        if (binaryData.length == 0) {
+            throw new IllegalArgumentException("Empty binary data");
+        }
+        
+        // Check compression flag (first byte)
+        boolean isCompressed = binaryData[0] == 1;
+        
+        if (isCompressed) {
+            // Decompress the data
+            try {
+                Inflater inflater = new Inflater();
+                inflater.setInput(binaryData, 1, binaryData.length - 1);
+                
+                // Estimate decompressed size (start with 4x compressed size)
+                byte[] decompressed = new byte[binaryData.length * 4];
+                int decompressedLength = inflater.inflate(decompressed);
+                
+                // If buffer was too small, try again with larger buffer
+                if (!inflater.finished()) {
+                    byte[] largerBuffer = new byte[binaryData.length * 8];
+                    System.arraycopy(decompressed, 0, largerBuffer, 0, decompressedLength);
+                    decompressedLength += inflater.inflate(largerBuffer, decompressedLength, 
+                                                          largerBuffer.length - decompressedLength);
+                    decompressed = largerBuffer;
+                }
+                
+                inflater.end();
+                
+                // Return only the actual decompressed data
+                byte[] actualData = new byte[decompressedLength];
+                System.arraycopy(decompressed, 0, actualData, 0, decompressedLength);
+                return ByteBuffer.wrap(actualData);
+                
+            } catch (Exception e) {
+                throw new IOException("Failed to decompress binary data: " + e.getMessage(), e);
+            }
+        } else {
+            // Not compressed, skip the compression flag byte
+            return ByteBuffer.wrap(binaryData, 1, binaryData.length - 1);
+        }
+         }
+     
+     /**
+      * Endpoint optimisé pour les environnements avec proxy - accepte des données binaires directement
+      * Charge un fichier Parquet via données binaires et le distribue entre les nœuds sans écriture sur disque
+      * 
+      * @param tableName Le nom de la table
+      * @param inputStream Le flux binaire direct contenant les données Parquet
+      * @param rowLimit Paramètre optionnel pour limiter le nombre de lignes
+      * @param batchSize Paramètre optionnel pour définir la taille des lots
+      * @param skipRows Paramètre optionnel pour sauter des lignes au début
+      * @return La réponse HTTP indiquant si le chargement a réussi
+      */
+     @POST
+     @Path("/{tableName}/load-binary")
+     @Consumes(MediaType.APPLICATION_OCTET_STREAM)
+     @Produces(MediaType.APPLICATION_JSON)
+     public Response loadDistributedBinary(
+             @PathParam("tableName") String tableName,
+             InputStream inputStream,
+             @QueryParam("rowLimit") @DefaultValue("-1") long rowLimit,
+             @QueryParam("batchSize") @DefaultValue("500000") int batchSize,
+             @QueryParam("skipRows") @DefaultValue("0") int skipRows) {
+         try {
+             // Vérifie que la table existe
+             if (!databaseContext.tableExists(tableName)) {
+                 return Response.status(Response.Status.NOT_FOUND)
+                         .entity("Table inconnue: " + tableName)
+                         .build();
+             }
+             
+             if (inputStream == null) {
+                 return Response.status(Response.Status.BAD_REQUEST)
+                         .entity("Le flux de données Parquet est obligatoire")
+                         .build();
+             }
+             
+             logger.info("Reçu un flux binaire Parquet pour la table '{}' avec params: rowLimit={}, batchSize={}, skipRows={}", 
+                     tableName, rowLimit, batchSize, skipRows);
+             
+             // Options de chargement
+             ParquetLoadOptions options = new ParquetLoadOptions();
+             options.setRowLimit(rowLimit);
+             options.setBatchSize(batchSize);
+             options.setSkipRows(skipRows);
+             options.setUseDirectAccess(true);  // Optimiser pour l'accès direct aux données
+             
+             // Chargement distribué en streaming sans écriture sur disque
+             Map<String, Long> distributionStats;
+             long startTime = System.currentTimeMillis();
+             
+             try {
+                 // Utilisation du chargeur distribué en mode streaming
+                 distributionStats = distributedParquetLoader.loadDistributedFromStream(
+                         tableName, inputStream, options);
+                 
+                 long duration = System.currentTimeMillis() - startTime;
+                 logger.info("Flux Parquet distribué et chargé avec succès en {} ms", duration);
+             } catch (Exception e) {
+                 logger.error("Erreur lors du chargement distribué depuis le flux binaire: {}", e.getMessage(), e);
+                 return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+                         .entity("Erreur lors du chargement distribué: " + e.getMessage())
+                         .build();
+             }
+             
+             // Construction de la réponse
+             Map<String, Object> result = new HashMap<>();
+             result.put("tableName", tableName);
+             result.put("distributionStats", distributionStats);
+             result.put("totalRowsLoaded", 
+                     distributionStats.values().stream().mapToLong(Long::longValue).sum());
+             result.put("message", "Données Parquet binaires chargées avec succès en mode distribué");
+             result.put("elapsedMs", System.currentTimeMillis() - startTime);
+             
+             return Response.ok(result).build();
+         } catch (Exception e) {
+             logger.error("Erreur lors du chargement distribué depuis le flux binaire: {}", e.getMessage(), e);
+             return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+                     .entity("Erreur: " + e.getMessage())
+                     .build();
+         }
+     }
+     
+     /**
+      * Classe de requête pour le chargement de fichiers Parquet
+      */
+     static class ParquetLoadRequest {
+         public String filePath;
+         public String file; // Alias pour filePath (pour compatibilité)
+         public long rowLimit = -1;
+         public int batchSize = 500000;
+     }
+     
+     /**
+      * Ultra-fast binary batch receiver using direct ByteBuffers and zero-copy operations
+     * This endpoint receives binary batch data and processes it without JSON deserialization
      * 
-     * @param tableName Le nom de la table
-     * @param inputStream Le flux binaire direct contenant les données Parquet
-     * @param rowLimit Paramètre optionnel pour limiter le nombre de lignes
-     * @param batchSize Paramètre optionnel pour définir la taille des lots
-     * @param skipRows Paramètre optionnel pour sauter des lignes au début
-     * @return La réponse HTTP indiquant si le chargement a réussi
+     * @param tableName Le nom de la table à mettre à jour
+     * @param binaryData Les données binaires du batch
+     * @param rowCount Nombre de lignes (passé en header pour validation)
+     * @param columnCount Nombre de colonnes (passé en header pour validation)
+     * @return Réponse HTTP indiquant le statut de l'opération
      */
     @POST
-    @Path("/{tableName}/load-binary")
+    @Path("/{tableName}/add-batch-binary")
     @Consumes(MediaType.APPLICATION_OCTET_STREAM)
     @Produces(MediaType.APPLICATION_JSON)
-    public Response loadDistributedBinary(
+    public Response addBinaryBatchFromRemoteNode(
             @PathParam("tableName") String tableName,
-            InputStream inputStream,
-            @QueryParam("rowLimit") @DefaultValue("-1") long rowLimit,
-            @QueryParam("batchSize") @DefaultValue("200000") int batchSize,
-            @QueryParam("skipRows") @DefaultValue("0") int skipRows) {
-        try {
-            // Vérifie que la table existe
-            if (!databaseContext.tableExists(tableName)) {
-                return Response.status(Response.Status.NOT_FOUND)
-                        .entity("Table inconnue: " + tableName)
-                        .build();
-            }
-            
-            if (inputStream == null) {
-                return Response.status(Response.Status.BAD_REQUEST)
-                        .entity("Le flux de données Parquet est obligatoire")
-                        .build();
-            }
-            
-            logger.info("Reçu un flux binaire Parquet pour la table '{}' avec params: rowLimit={}, batchSize={}, skipRows={}", 
-                    tableName, rowLimit, batchSize, skipRows);
-            
-            // Options de chargement
-            ParquetLoadOptions options = new ParquetLoadOptions();
-            options.setRowLimit(rowLimit);
-            options.setBatchSize(batchSize);
-            options.setSkipRows(skipRows);
-            options.setUseDirectAccess(true);  // Optimiser pour l'accès direct aux données
-            
-            // Chargement distribué en streaming sans écriture sur disque
-            Map<String, Long> distributionStats;
-            long startTime = System.currentTimeMillis();
-            
-            try {
-                // Utilisation du chargeur distribué en mode streaming
-                distributionStats = distributedParquetLoader.loadDistributedFromStream(
-                        tableName, inputStream, options);
-                
-                long duration = System.currentTimeMillis() - startTime;
-                logger.info("Flux Parquet distribué et chargé avec succès en {} ms", duration);
-            } catch (Exception e) {
-                logger.error("Erreur lors du chargement distribué depuis le flux binaire: {}", e.getMessage(), e);
-                return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
-                        .entity("Erreur lors du chargement distribué: " + e.getMessage())
-                        .build();
-            }
-            
-            // Construction de la réponse
-            Map<String, Object> result = new HashMap<>();
-            result.put("tableName", tableName);
-            result.put("distributionStats", distributionStats);
-            result.put("totalRowsLoaded", 
-                    distributionStats.values().stream().mapToLong(Long::longValue).sum());
-            result.put("message", "Données Parquet binaires chargées avec succès en mode distribué");
-            result.put("elapsedMs", System.currentTimeMillis() - startTime);
-            
-            return Response.ok(result).build();
-        } catch (Exception e) {
-            logger.error("Erreur lors du chargement distribué depuis le flux binaire: {}", e.getMessage(), e);
-            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
-                    .entity("Erreur: " + e.getMessage())
-                    .build();
-        }
-    }
-    
-    /**
-     * Classe de requête pour le chargement de fichiers Parquet
-     */
-    static class ParquetLoadRequest {
-        public String filePath;
-        public String file; // Alias pour filePath (pour compatibilité)
-        public long rowLimit = -1;
-        public int batchSize = 200000;
-    }
-    
-    /**
-     * Reçoit un batch de données d'un autre nœud et l'ajoute à la table locale
-     * 
-     * @param tableName Le nom de la table à mettre à jour
-     * @param batchData Les données du batch au format JSON
-     * @return Réponse HTTP indiquant le statut de l'opération
-     */
-    @POST
-    @Path("/{tableName}/add-batch")
-    @Consumes(MediaType.APPLICATION_JSON)
-    @Produces(MediaType.APPLICATION_JSON)
-    public Response addBatchFromRemoteNode(
-            @PathParam("tableName") String tableName,
-            Map<String, Object> batchData) {
+            byte[] binaryData,
+            @HeaderParam("X-Row-Count") int expectedRowCount,
+            @HeaderParam("X-Column-Count") int expectedColumnCount) {
         
         try {
             // Vérifie que la table existe
@@ -1378,116 +1432,36 @@ public class TableResource {
                         .build();
             }
             
-            // Extrait les données du batch
-            @SuppressWarnings("unchecked")
-            List<List<Object>> rows = (List<List<Object>>) batchData.get("rows");
-            if (rows == null || rows.isEmpty()) {
+            if (binaryData == null || binaryData.length == 0) {
                 return Response.status(Response.Status.BAD_REQUEST)
-                        .entity(Map.of("error", "Batch de données vide ou invalide"))
+                        .entity(Map.of("error", "Données binaires vides ou invalides"))
                         .build();
             }
             
-            TableData tableData = databaseContext.getTableData(tableName);
-            int rowsAdded = 0;
+            // Decode binary data using direct ByteBuffer for maximum performance
+            ByteBuffer buffer = decompressIfNeeded(binaryData);
             
-            // Ajoute les lignes à la table locale
-            tableData.writeLock();
-            try {
-                // Conversion des ArrayList en tableaux Object[] avec conversion des types
-                Table table = databaseContext.getTable(tableName);
-                List<Column> columns = table.getColumns();
-                
-                for (List<Object> rowList : rows) {
-                    // Prépare un tableau d'objets avec le bon nombre de colonnes
-                    Object[] rowArray = new Object[columns.size()];
-                    
-                    // Récupère les valeurs et effectue les conversions nécessaires
-                    for (int i = 0; i < Math.min(rowList.size(), columns.size()); i++) {
-                        Object value = rowList.get(i);
-                        Column column = columns.get(i);
-                        
-                        // Conversions spécifiques par type
-                        if (value != null) {
-                            // Conversion Integer -> Long si nécessaire
-                            if (value instanceof Integer && "LONG".equals(column.getType().name())) {
-                                value = ((Integer) value).longValue();
-                            }
-                            // Conversions Double -> Float si nécessaire
-                            else if (value instanceof Double && "FLOAT".equals(column.getType().name())) {
-                                value = ((Double) value).floatValue();
-                            }
-                            // Ajoutez d'autres conversions si nécessaire
-                        }
-                        
-                        rowArray[i] = value;
-                    }
-                    
-                    tableData.addRow(rowArray);
-                    rowsAdded++;
-                }
-            } finally {
-                tableData.writeUnlock();
-            }
+            // Read table name for validation
+            int tableNameLength = buffer.getInt();
+            byte[] tableNameBytes = new byte[tableNameLength];
+            buffer.get(tableNameBytes);
+            String receivedTableName = new String(tableNameBytes, java.nio.charset.StandardCharsets.UTF_8);
             
-            // Log et retourne le résultat
-            logger.info("[Remote Batch] Ajout de {} lignes à la table {}", rowsAdded, tableName);
-            
-            return Response.ok(Map.of(
-                    "tableName", tableName,
-                    "rowsAdded", rowsAdded,
-                    "status", "success"
-            )).build();
-            
-        } catch (Exception e) {
-            logger.error("Erreur lors de l'ajout du batch distant: {}", e.getMessage(), e);
-            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
-                    .entity(Map.of("error", "Erreur lors de l'ajout du batch: " + e.getMessage()))
-                    .build();
-        }
-    }
-    
-    /**
-     * Reçoit un batch de données d'un autre nœud au format colonne et l'ajoute à la table locale
-     * Ce format est optimisé pour réduire l'usage mémoire et la taille des données sérialisées
-     * 
-     * @param tableName Le nom de la table à mettre à jour
-     * @param batchData Les données du batch au format JSON organisé par colonnes
-     * @return Réponse HTTP indiquant le statut de l'opération
-     */
-    @POST
-    @Path("/{tableName}/add-batch-columnar")
-    @Consumes(MediaType.APPLICATION_JSON)
-    @Produces(MediaType.APPLICATION_JSON)
-    public Response addBatchColumnarFromRemoteNode(
-            @PathParam("tableName") String tableName,
-            Map<String, Object> batchData) {
-        
-        try {
-            // Vérifie que la table existe
-            if (!databaseContext.tableExists(tableName)) {
-                return Response.status(Response.Status.NOT_FOUND)
-                        .entity(Map.of("error", "Table inconnue: " + tableName))
+            if (!tableName.equals(receivedTableName)) {
+                return Response.status(Response.Status.BAD_REQUEST)
+                        .entity(Map.of("error", "Table name mismatch: expected " + tableName + ", got " + receivedTableName))
                         .build();
             }
             
-            // Vérifie le format des données
-            if (!"column-based".equals(batchData.get("format"))) {
+            // Read dimensions
+            int rowCount = buffer.getInt();
+            int columnCount = buffer.getInt();
+            
+            // Validate dimensions
+            if (rowCount != expectedRowCount || columnCount != expectedColumnCount) {
                 return Response.status(Response.Status.BAD_REQUEST)
-                        .entity(Map.of("error", "Format de données non pris en charge. Format 'column-based' requis."))
-                        .build();
-            }
-            
-            // Récupère les informations du batch
-            int rowCount = ((Number) batchData.get("rowCount")).intValue();
-            int columnCount = ((Number) batchData.get("columnCount")).intValue();
-            
-            // Suppression sécurisée - nous vérifions le contenu après la conversion
-            @SuppressWarnings("unchecked")
-            List<Map<String, Object>> columns = (List<Map<String, Object>>) batchData.get("columns");
-            
-            if (columns == null || columns.isEmpty() || columns.size() != columnCount) {
-                return Response.status(Response.Status.BAD_REQUEST)
-                        .entity(Map.of("error", "Données de batch invalides: colonnes manquantes ou nombre incorrect"))
+                        .entity(Map.of("error", "Dimension mismatch: expected " + expectedRowCount + "x" + expectedColumnCount + 
+                                ", got " + rowCount + "x" + columnCount))
                         .build();
             }
             
@@ -1502,142 +1476,213 @@ public class TableResource {
                         .build();
             }
             
-            // Traitement optimisé par colonne pour réduire les allocations
+            // Read column types
+            byte[] columnTypes = new byte[columnCount];
+            buffer.get(columnTypes);
+            
+            // Ultra-fast binary processing with direct memory access
             tableData.writeLock();
             try {
-                for (int rowIndex = 0; rowIndex < rowCount; rowIndex++) {
-                    // Traitement efficace ligne par ligne pour éviter la création d'objets temporaires
-                    for (int colIndex = 0; colIndex < columnCount; colIndex++) {
-                        Map<String, Object> columnData = columns.get(colIndex);
-                        String columnType = (String) columnData.get("type");
-                        
-                        // Conversion sécurisée des tableaux JSON désérialisés (ArrayList) en tableaux primitifs
-                        Object nullsObj = columnData.get("nulls");
-                        boolean isNull = false;
-                        
-                        if (nullsObj instanceof boolean[]) {
-                            // Déjà un tableau de booléens
-                            boolean[] nulls = (boolean[]) nullsObj;
-                            isNull = nulls[rowIndex];
-                        } else if (nullsObj instanceof List) {
-                            // Convertir ArrayList en booléens
-                            List<?> nullsList = (List<?>) nullsObj;
-                            isNull = Boolean.TRUE.equals(nullsList.get(rowIndex));
-                        }
-                        
-                        if (isNull) {
-                            tableData.getColumnStore(colIndex).addNull();
-                            continue;
-                        }
-                        
-                        // Optimisation: accès direct aux tableaux de valeurs primitives
-                        // avec gestion sécurisée de la désérialisation JSON
-                        switch (columnType) {
-                            case "int":
-                                Object intObj = columnData.get("values");
-                                if (intObj instanceof int[]) {
-                                    int[] intValues = (int[]) intObj;
-                                    tableData.getColumnStore(colIndex).addInt(intValues[rowIndex]);
-                                } else if (intObj instanceof List) {
-                                    List<?> intList = (List<?>) intObj;
-                                    Object value = intList.get(rowIndex);
-                                    tableData.getColumnStore(colIndex).addInt(value instanceof Number ? 
-                                        ((Number) value).intValue() : Integer.parseInt(value.toString()));
-                                }
-                                break;
-                                
-                            case "long":
-                                Object longObj = columnData.get("values");
-                                if (longObj instanceof long[]) {
-                                    long[] longValues = (long[]) longObj;
-                                    tableData.getColumnStore(colIndex).addLong(longValues[rowIndex]);
-                                } else if (longObj instanceof List) {
-                                    List<?> longList = (List<?>) longObj;
-                                    Object value = longList.get(rowIndex);
-                                    tableData.getColumnStore(colIndex).addLong(value instanceof Number ? 
-                                        ((Number) value).longValue() : Long.parseLong(value.toString()));
-                                }
-                                break;
-                                
-                            case "float":
-                                Object floatObj = columnData.get("values");
-                                if (floatObj instanceof float[]) {
-                                    float[] floatValues = (float[]) floatObj;
-                                    tableData.getColumnStore(colIndex).addFloat(floatValues[rowIndex]);
-                                } else if (floatObj instanceof List) {
-                                    List<?> floatList = (List<?>) floatObj;
-                                    Object value = floatList.get(rowIndex);
-                                    tableData.getColumnStore(colIndex).addFloat(value instanceof Number ? 
-                                        ((Number) value).floatValue() : Float.parseFloat(value.toString()));
-                                }
-                                break;
-                                
-                            case "double":
-                                Object doubleObj = columnData.get("values");
-                                if (doubleObj instanceof double[]) {
-                                    double[] doubleValues = (double[]) doubleObj;
-                                    tableData.getColumnStore(colIndex).addDouble(doubleValues[rowIndex]);
-                                } else if (doubleObj instanceof List) {
-                                    List<?> doubleList = (List<?>) doubleObj;
-                                    Object value = doubleList.get(rowIndex);
-                                    tableData.getColumnStore(colIndex).addDouble(value instanceof Number ? 
-                                        ((Number) value).doubleValue() : Double.parseDouble(value.toString()));
-                                }
-                                break;
-                                
-                            case "boolean":
-                                Object boolObj = columnData.get("values");
-                                if (boolObj instanceof boolean[]) {
-                                    boolean[] boolValues = (boolean[]) boolObj;
-                                    tableData.getColumnStore(colIndex).addBoolean(boolValues[rowIndex]);
-                                } else if (boolObj instanceof List) {
-                                    List<?> boolList = (List<?>) boolObj;
-                                    Object value = boolList.get(rowIndex);
-                                    tableData.getColumnStore(colIndex).addBoolean(value instanceof Boolean ? 
-                                        (Boolean) value : Boolean.parseBoolean(value.toString()));
-                                }
-                                break;
-                                
-                            case "string":
-                            default:
-                                Object stringObj = columnData.get("values");
-                                if (stringObj instanceof String[]) {
-                                    String[] stringValues = (String[]) stringObj;
-                                    // Skip string interning for better performance during bulk loading
-                                    tableData.getColumnStore(colIndex).addString(stringValues[rowIndex]);
-                                } else if (stringObj instanceof List) {
-                                    List<?> stringList = (List<?>) stringObj;
-                                    Object value = stringList.get(rowIndex);
-                                    // Skip string interning for better performance during bulk loading
-                                    tableData.getColumnStore(colIndex).addString(value != null ? 
-                                                                                value.toString() : null);
-                                }
-                                break;
-                        }
-                    }
+                // Pre-allocate column stores array to avoid repeated lookups
+                ColumnStore[] columnStores = new ColumnStore[columnCount];
+                for (int i = 0; i < columnCount; i++) {
+                    columnStores[i] = tableData.getColumnStore(i);
+                }
+                
+                // Process each column entirely before moving to next column (better cache locality)
+                for (int colIndex = 0; colIndex < columnCount; colIndex++) {
+                    ColumnStore columnStore = columnStores[colIndex];
+                    byte columnType = columnTypes[colIndex];
                     
-                    // Note: Row count will be incremented in bulk after the loop
+                    // Read null bitmap
+                    int nullBitmapSize = (rowCount + 7) / 8;
+                    byte[] nullBitmap = new byte[nullBitmapSize];
+                    buffer.get(nullBitmap);
+                    
+                    // Process column data based on type with maximum efficiency
+                    switch (columnType) {
+                        case 1: // INT
+                            for (int rowIndex = 0; rowIndex < rowCount; rowIndex++) {
+                                boolean isNull = isNullInBitmap(nullBitmap, rowIndex);
+                                if (isNull) {
+                                    columnStore.addNull();
+                                } else {
+                                    columnStore.addInt(buffer.getInt());
+                                }
+                            }
+                            break;
+                            
+                        case 2: // LONG
+                            for (int rowIndex = 0; rowIndex < rowCount; rowIndex++) {
+                                boolean isNull = isNullInBitmap(nullBitmap, rowIndex);
+                                if (isNull) {
+                                    columnStore.addNull();
+                                } else {
+                                    columnStore.addLong(buffer.getLong());
+                                }
+                            }
+                            break;
+                            
+                        case 3: // FLOAT
+                            for (int rowIndex = 0; rowIndex < rowCount; rowIndex++) {
+                                boolean isNull = isNullInBitmap(nullBitmap, rowIndex);
+                                if (isNull) {
+                                    columnStore.addNull();
+                                } else {
+                                    columnStore.addFloat(buffer.getFloat());
+                                }
+                            }
+                            break;
+                            
+                        case 4: // DOUBLE
+                            for (int rowIndex = 0; rowIndex < rowCount; rowIndex++) {
+                                boolean isNull = isNullInBitmap(nullBitmap, rowIndex);
+                                if (isNull) {
+                                    columnStore.addNull();
+                                } else {
+                                    columnStore.addDouble(buffer.getDouble());
+                                }
+                            }
+                            break;
+                            
+                        case 5: // BOOLEAN
+                            // Read packed boolean data
+                            int boolDataSize = (rowCount + 7) / 8;
+                            byte[] boolData = new byte[boolDataSize];
+                            buffer.get(boolData);
+                            
+                            for (int rowIndex = 0; rowIndex < rowCount; rowIndex++) {
+                                boolean isNull = isNullInBitmap(nullBitmap, rowIndex);
+                                if (isNull) {
+                                    columnStore.addNull();
+                                } else {
+                                    boolean value = isBooleanSetInBitmap(boolData, rowIndex);
+                                    columnStore.addBoolean(value);
+                                }
+                            }
+                            break;
+                            
+                        case 6: // STRING
+                            for (int rowIndex = 0; rowIndex < rowCount; rowIndex++) {
+                                boolean isNull = isNullInBitmap(nullBitmap, rowIndex);
+                                if (isNull) {
+                                    columnStore.addNull();
+                                } else {
+                                    int strLength = buffer.getInt();
+                                    if (strLength > 0) {
+                                        byte[] strBytes = new byte[strLength];
+                                        buffer.get(strBytes);
+                                        String value = new String(strBytes, java.nio.charset.StandardCharsets.UTF_8);
+                                        columnStore.addString(value);
+                                    } else {
+                                        columnStore.addString("");
+                                    }
+                                }
+                            }
+                            break;
+                            
+                        default:
+                            // For unknown types, try to match the actual column type
+                            DataType actualType = columnStore.getType();
+                            for (int rowIndex = 0; rowIndex < rowCount; rowIndex++) {
+                                boolean isNull = isNullInBitmap(nullBitmap, rowIndex);
+                                if (isNull) {
+                                    columnStore.addNull();
+                                } else {
+                                    // Read as string and convert to appropriate type
+                                    int strLength = buffer.getInt();
+                                    String strValue = "";
+                                    if (strLength > 0) {
+                                        byte[] strBytes = new byte[strLength];
+                                        buffer.get(strBytes);
+                                        strValue = new String(strBytes, java.nio.charset.StandardCharsets.UTF_8);
+                                    }
+                                    
+                                    // Convert string to appropriate type
+                                    try {
+                                        switch (actualType) {
+                                            case INTEGER:
+                                                columnStore.addInt(Integer.parseInt(strValue));
+                                                break;
+                                            case LONG:
+                                                columnStore.addLong(Long.parseLong(strValue));
+                                                break;
+                                            case FLOAT:
+                                                columnStore.addFloat(Float.parseFloat(strValue));
+                                                break;
+                                            case DOUBLE:
+                                                columnStore.addDouble(Double.parseDouble(strValue));
+                                                break;
+                                            case BOOLEAN:
+                                                columnStore.addBoolean(Boolean.parseBoolean(strValue));
+                                                break;
+                                            case STRING:
+                                                columnStore.addString(strValue);
+                                                break;
+                                            case DATE:
+                                            case TIMESTAMP:
+                                                columnStore.addDate(Long.parseLong(strValue));
+                                                break;
+                                            default:
+                                                columnStore.addString(strValue);
+                                                break;
+                                        }
+                                    } catch (NumberFormatException e) {
+                                        // If conversion fails, add as string or null
+                                        if (actualType == DataType.STRING) {
+                                            columnStore.addString(strValue);
+                                        } else {
+                                            columnStore.addNull();
+                                        }
+                                    }
+                                }
+                            }
+                            break;
+                    }
                 }
                 
                 // Bulk increment row count for much better performance
                 tableData.incrementRowCount(rowCount);
                 
-                logger.info("[Remote Batch Columnar] Ajout de {} lignes à la table {}", rowCount, tableName);
+                // Log less frequently for better performance
+                if (rowCount >= 100000) {
+                    logger.info("[Remote Batch Binary] Ajout de {} lignes à la table {} ({} bytes)", 
+                            rowCount, tableName, binaryData.length);
+                }
                 
                 return Response.ok(Map.of(
                         "tableName", tableName,
                         "rowsAdded", rowCount,
                         "status", "success",
-                        "format", "columnar"
+                        "format", "binary",
+                        "bytesProcessed", binaryData.length
                 )).build();
             } finally {
                 tableData.writeUnlock();
             }
         } catch (Exception e) {
-            logger.error("Erreur lors de l'ajout du batch columnar distant: {}", e.getMessage(), e);
+            logger.error("Erreur lors de l'ajout du batch binaire distant: {}", e.getMessage(), e);
             return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
-                    .entity(Map.of("error", "Erreur lors de l'ajout du batch columnar: " + e.getMessage()))
+                    .entity(Map.of("error", "Erreur lors de l'ajout du batch binaire: " + e.getMessage()))
                     .build();
         }
+    }
+    
+    /**
+     * Checks if a specific bit is set in a null bitmap
+     */
+    private boolean isNullInBitmap(byte[] bitmap, int index) {
+        int byteIndex = index / 8;
+        int bitIndex = index % 8;
+        return (bitmap[byteIndex] & (1 << bitIndex)) != 0;
+    }
+    
+    /**
+     * Checks if a specific boolean bit is set in a boolean bitmap
+     */
+    private boolean isBooleanSetInBitmap(byte[] bitmap, int index) {
+        int byteIndex = index / 8;
+        int bitIndex = index % 8;
+        return (bitmap[byteIndex] & (1 << bitIndex)) != 0;
     }
 }

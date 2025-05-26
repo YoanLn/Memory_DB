@@ -12,7 +12,6 @@ import com.memorydb.query.QueryResult;
 
 import com.memorydb.rest.dto.OrderByDto;
 import com.memorydb.rest.dto.QueryDto;
-import com.memorydb.rest.dto.QueryResultDto;
 import com.memorydb.storage.ColumnStore;
 import com.memorydb.storage.TableData;
 
@@ -258,33 +257,31 @@ public class QueryResource {
                 }
                 
                 // Construit le résultat en respectant l'ordre des colonnes demandées
-                QueryResultDto resultDto = new QueryResultDto();
-                
-                // Définit l'ordre des colonnes dans le résultat (important pour préserver l'ordre demandé)
-                resultDto.setColumns(selectedColumns);
+                List<Map<String, Object>> resultRows = new ArrayList<>();
                 
                 // S'assure que la limite n'est jamais négative pour éviter NegativeArraySizeException
                 int resultCount = filteredRows.size();
                 
-                // Optimisation: utiliser directement un tableau 2D au lieu d'une liste de Maps
-                Object[][] resultData = new Object[resultCount][selectedColumns.size()];
-                
-                // Remplir le tableau de résultats dans l'ordre demandé
+                // Remplir les résultats dans l'ordre demandé
                 for (int i = 0; i < resultCount; i++) {
                     int rowIndex = filteredRows.get(i);
+                    Map<String, Object> row = new HashMap<>();
                     
-                    for (int j = 0; j < selectedColumns.size(); j++) {
-                        String columnName = selectedColumns.get(j);
+                    for (String columnName : selectedColumns) {
                         ColumnStore columnStore = tableData.getColumnStore(columnName);
-                        resultData[i][j] = extractColumnValue(rowIndex, columnStore);
+                        row.put(columnName, extractColumnValue(rowIndex, columnStore));
                     }
+                    
+                    resultRows.add(row);
                 }
                 
-                // Utiliser la version optimisée du DTO avec stockage en tableau
-                resultDto.setRawData(resultData);
+                // ULTRA-AGGRESSIVE: Return optimized response format
+                Map<String, Object> response = new HashMap<>();
+                response.put("columns", selectedColumns);
+                response.put("rows", resultRows);
+                response.put("totalRows", resultCount);
                 
-                // IMPORTANT: On renvoie maintenant un DTO qui garantit l'ordre des colonnes
-                return Response.ok(resultDto).build();
+                return Response.ok(response).build();
             } finally {
                 tableData.readUnlock();
             }
